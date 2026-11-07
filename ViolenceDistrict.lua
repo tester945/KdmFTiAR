@@ -151,6 +151,24 @@ local function RawChildren(address)
     return addresses
 end
 
+local function PartPose(part)
+    local primitive = part and ReadU64(tonumber(part.Data), O.BasePart.Primitive)
+    if not IsHeapPointer(primitive) then return nil end
+    local okRotation, rotation = pcall(memory.readbuffer, primitive, O.Primitive.Rotation, 36)
+    local okPosition, position = pcall(memory.readbuffer, primitive, O.Primitive.Position, 12)
+    local okSize, size = pcall(memory.readbuffer, primitive, O.Primitive.Size, 12)
+    if not okRotation or not okPosition or not okSize or not rotation or not position or not size then return nil end
+    local sizeVector = vector.create(buffer.readf32(size, 0), buffer.readf32(size, 4), buffer.readf32(size, 8))
+    local positionVector = vector.create(buffer.readf32(position, 0), buffer.readf32(position, 4), buffer.readf32(position, 8))
+    local right = vector.create(buffer.readf32(rotation, 0), buffer.readf32(rotation, 12), buffer.readf32(rotation, 24))
+    local up = vector.create(buffer.readf32(rotation, 4), buffer.readf32(rotation, 16), buffer.readf32(rotation, 28))
+    local look = -vector.create(buffer.readf32(rotation, 8), buffer.readf32(rotation, 20), buffer.readf32(rotation, 32))
+    local rightLength = vector.magnitude(right)
+    if rightLength ~= rightLength or math.abs(rightLength - 1) > .05 or math.abs(vector.magnitude(look) - 1) > .05 then return nil end
+    if sizeVector.X <= 0 or sizeVector.Y <= 0 or sizeVector.Z <= 0 or vector.magnitude(sizeVector) > 5000 or vector.magnitude(positionVector) > 1e6 then return nil end
+    return {Parent = true, PartSize = sizeVector, Position = positionVector, RightVector = right, UpVector = up, LookVector = look}
+end
+
 local function ReadStdString(address, maxSize)
     local size = ReadU64(address, 0x10)
     local capacity = ReadU64(address, 0x18)
@@ -417,11 +435,11 @@ local function ScanGenerators()
         local generatorAddress = tonumber(generator.Data)
         local id = tostring(generatorAddress)
         if generatorAddress and raw[generatorAddress] and not generators[id] then
-            local body = generator:FindFirstChild("GeneratorBody")
-            if body then
+            local pose = PartPose(generator:FindFirstChild("GeneratorBody"))
+            if pose then
                 generators[id] = {
                     Address = generatorAddress,
-                    Pose = {Parent = true, PartSize = body.Size, Position = body.Position, RightVector = body.RightVector, UpVector = body.UpVector, LookVector = body.LookVector},
+                    Pose = pose,
                     Progress = -1,
                     Completed = false,
                     Text = "",
@@ -603,29 +621,32 @@ local function ScanPallets()
                 local part = intact and intact:FindFirstChild("Pallet")
                 local root = intact and intact:FindFirstChild("RootPart")
                 local bone = root and root:FindFirstChild("Bone")
-                if part and bone then
-                    local position, right, up, look = part.Position, part.RightVector, part.UpVector, part.LookVector
-                    local hitbox = pallet:FindFirstChild("hitbox")
+                local partPose = part and bone and PartPose(part)
+                local rootPose = partPose and PartPose(root)
+                if rootPose then
+                    local hitboxPose = PartPose(pallet:FindFirstChild("hitbox"))
+                    if hitboxPose then hitboxPose.Size = hitboxPose.PartSize end
                     entry = {
-                        Hitbox = hitbox and {Position = hitbox.Position, RightVector = hitbox.RightVector, UpVector = hitbox.UpVector, LookVector = hitbox.LookVector, Size = hitbox.Size},
+                        Hitbox = hitboxPose,
                         Address = palletAddress,
                         Part = part,
                         Bone = bone,
-                        RootPosition = root.Position,
-                        RootRight = root.RightVector,
-                        RootUp = root.UpVector,
-                        RootLook = root.LookVector,
-                        RestPosition = position,
-                        RestRight = right,
-                        RestUp = up,
-                        RestLook = look,
-                        Pose = {Parent = true, PartSize = part.Size, Position = position, RightVector = right, UpVector = up, LookVector = look},
+                        RootPosition = rootPose.Position,
+                        RootRight = rootPose.RightVector,
+                        RootUp = rootPose.UpVector,
+                        RootLook = rootPose.LookVector,
+                        RestPosition = partPose.Position,
+                        RestRight = partPose.RightVector,
+                        RestUp = partPose.UpVector,
+                        RestLook = partPose.LookVector,
+                        Pose = partPose,
                     }
                     pallets[id] = entry
                 end
             end
             if entry and not entry.Hidden then
-                entry.Hidden = entry.Part.Transparency > .99
+                local ok, transparency = pcall(memory.readf32, entry.Part, O.BasePart.Transparency)
+                entry.Hidden = ok and transparency > .99
             end
         end
     end
@@ -1398,9 +1419,9 @@ do
                         local isTrap = inst.Name == "BearTrap"
                         mapChildren[child] = isTrap
                         if isTrap then
-                            local cube = inst:FindFirstChild("Cube")
-                            if cube then
-                                traps[child] = {Model = inst, Position = cube.Position, Armed = inst:GetAttribute("Armed")}
+                            local cubePose = PartPose(inst:FindFirstChild("Cube"))
+                            if cubePose then
+                                traps[child] = {Model = inst, Position = cubePose.Position, Armed = inst:GetAttribute("Armed")}
                             else
                                 mapChildren[child] = nil
                             end
@@ -1477,19 +1498,13 @@ do
         windows, mapAddress, nextFullScan = {}, nil, 0
     end
 
-    local function WindowPose(window)
-        local bottom = window:FindFirstChild("Bottom")
-        if not bottom then return nil end
-        return {Parent = true, PartSize = bottom.Size, Position = bottom.Position, RightVector = bottom.RightVector, UpVector = bottom.UpVector, LookVector = bottom.LookVector}
-    end
-
     local function FullScan(map, address)
         local found = {}
         local count = 0
         for index, descendant in map:GetDescendants() do
             if descendant.Name == "Window" then
-                local ok, pose = pcall(WindowPose, descendant)
-                if ok and pose then
+                local pose = PartPose(descendant:FindFirstChild("Bottom"))
+                if pose then
                     found[tonumber(descendant.Data)] = pose
                     count += 1
                 end
