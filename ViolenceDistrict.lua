@@ -1466,44 +1466,44 @@ local UpdateWindows, RenderWindows, ClearWindows
 
 do
     local windowCheckInterval = .5
-    local scanDelays = {2, 10}
     local fullScanInterval = 2
     local scanYieldEvery = 500
     local windows = {}
-    local known = {}
-    local mapAddress, mapChangedAt, nextFullScan
-    local scansDone = 0
+    local mapAddress
+    local nextFullScan = 0
     local nextCheck = 0
 
     ClearWindows = function()
-        windows, known = {}, {}
-        mapAddress, mapChangedAt, nextFullScan, scansDone = nil, nil, nil, 0
+        windows, mapAddress, nextFullScan = {}, nil, 0
     end
 
-    local function AddWindow(window, address)
-        if windows[address] then return true end
+    local function WindowPose(window)
         local bottom = window:FindFirstChild("Bottom")
-        if not bottom then return false end
-        windows[address] = {Parent = true, PartSize = bottom.Size, Position = bottom.Position, RightVector = bottom.RightVector, UpVector = bottom.UpVector, LookVector = bottom.LookVector}
-        return true
+        if not bottom then return nil end
+        return {Parent = true, PartSize = bottom.Size, Position = bottom.Position, RightVector = bottom.RightVector, UpVector = bottom.UpVector, LookVector = bottom.LookVector}
     end
 
     local function FullScan(map, address)
-        local before = 0
-        for _ in windows do before += 1 end
+        local found = {}
+        local count = 0
         for index, descendant in map:GetDescendants() do
             if descendant.Name == "Window" then
-                local windowAddress = tonumber(descendant.Data)
-                if AddWindow(descendant, windowAddress) then known[windowAddress] = true end
+                local ok, pose = pcall(WindowPose, descendant)
+                if ok and pose then
+                    found[tonumber(descendant.Data)] = pose
+                    count += 1
+                end
             end
             if index % scanYieldEvery == 0 then
                 task.wait()
                 if mapAddress ~= address then return end
             end
         end
-        local after = 0
-        for _ in windows do after += 1 end
-        if after ~= before then print(string.format("[windows] %d found (+%d)", after, after - before)) end
+        if mapAddress ~= address then return end
+        local before = 0
+        for _ in windows do before += 1 end
+        windows = found
+        if count ~= before then print(string.format("[windows] %d found", count)) end
     end
 
     UpdateWindows = function(now)
@@ -1515,29 +1515,9 @@ do
         local address = map and tonumber(map.Data)
         if address ~= mapAddress then
             ClearWindows()
-            mapAddress, mapChangedAt = address, now
+            mapAddress, nextFullScan = address, now + fullScanInterval
         end
-        if not address then return end
-
-        local resources = map:FindFirstChild("resources")
-        local watched = {map, map:FindFirstChild("Windows"), map:FindFirstChild("Vaults"), resources and resources:FindFirstChild("Windows"), resources and resources:FindFirstChild("Vaults")}
-        for _, container in watched do
-            for child in RawChildren(tonumber(container.Data)) or {} do
-                if not known[child] then
-                    known[child] = true
-                    local inst = pointer_to_userdata(child)
-                    if inst.Name == "Window" and not AddWindow(inst, child) then known[child] = nil end
-                end
-            end
-        end
-
-        if scansDone < #scanDelays then
-            if now - mapChangedAt >= scanDelays[scansDone + 1] then
-                scansDone += 1
-                nextFullScan = now + fullScanInterval
-                task.spawn(FullScan, map, address)
-            end
-        elseif now >= nextFullScan then
+        if address and now >= nextFullScan then
             nextFullScan = now + fullScanInterval
             task.spawn(FullScan, map, address)
         end
