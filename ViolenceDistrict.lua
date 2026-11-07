@@ -1464,42 +1464,45 @@ local windowColor = Color3.fromRGB(204, 184, 184)
 local UpdateWindows, RenderWindows, ClearWindows
 
 do
-    local windowCheckInterval = 1
+    local windowCheckInterval = .5
     local scanDelays = {2, 10}
-    local rescanChildChange = 20
+    local fullScanInterval = 2
     local scanYieldEvery = 500
     local windows = {}
-    local mapAddress, mapChangedAt, scanCount
+    local known = {}
+    local mapAddress, mapChangedAt, nextFullScan
     local scansDone = 0
     local nextCheck = 0
 
     ClearWindows = function()
-        windows, mapAddress, mapChangedAt, scanCount, scansDone = {}, nil, nil, nil, 0
+        windows, known = {}, {}
+        mapAddress, mapChangedAt, nextFullScan, scansDone = nil, nil, nil, 0
     end
 
-    local function ChildCount(address)
-        local list = ReadU64(address, O.Instance.ChildrenStart)
-        local first = list and ReadU64(list, 0)
-        local last = list and ReadU64(list, O.Instance.ChildrenEnd)
-        if not first or not last or last < first then return 0 end
-        return (last - first) / 0x10
+    local function AddWindow(window, address)
+        if windows[address] then return true end
+        local bottom = window:FindFirstChild("Bottom")
+        if not bottom then return false end
+        windows[address] = {Parent = true, PartSize = bottom.Size, Position = bottom.Position, RightVector = bottom.RightVector, UpVector = bottom.UpVector, LookVector = bottom.LookVector}
+        return true
     end
 
     local function FullScan(map, address)
-        local found = {}
+        local before = 0
+        for _ in windows do before += 1 end
         for index, descendant in map:GetDescendants() do
             if descendant.Name == "Window" then
-                local bottom = descendant:FindFirstChild("Bottom")
-                if bottom then
-                    found[tonumber(descendant.Data)] = {Parent = true, PartSize = bottom.Size, Position = bottom.Position, RightVector = bottom.RightVector, UpVector = bottom.UpVector, LookVector = bottom.LookVector}
-                end
+                local windowAddress = tonumber(descendant.Data)
+                if AddWindow(descendant, windowAddress) then known[windowAddress] = true end
             end
             if index % scanYieldEvery == 0 then
                 task.wait()
                 if mapAddress ~= address then return end
             end
         end
-        if mapAddress == address then windows = found end
+        local after = 0
+        for _ in windows do after += 1 end
+        if after ~= before then print(string.format("[windows] %d found (+%d)", after, after - before)) end
     end
 
     UpdateWindows = function(now)
@@ -1510,17 +1513,31 @@ do
         local map = workspace:FindFirstChild("Map")
         local address = map and tonumber(map.Data)
         if address ~= mapAddress then
-            windows, mapAddress, mapChangedAt, scanCount, scansDone = {}, address, now, nil, 0
+            ClearWindows()
+            mapAddress, mapChangedAt = address, now
         end
         if not address then return end
 
-        local count = ChildCount(address)
-        if scanCount and math.abs(count - scanCount) > rescanChildChange then
-            mapChangedAt, scansDone = now, 0
+        local resources = map:FindFirstChild("resources")
+        local watched = {map, map:FindFirstChild("Windows"), map:FindFirstChild("Vaults"), resources and resources:FindFirstChild("Windows"), resources and resources:FindFirstChild("Vaults")}
+        for _, container in watched do
+            for child in RawChildren(tonumber(container.Data)) or {} do
+                if not known[child] then
+                    known[child] = true
+                    local inst = pointer_to_userdata(child)
+                    if inst.Name == "Window" and not AddWindow(inst, child) then known[child] = nil end
+                end
+            end
         end
-        if scansDone < #scanDelays and now - mapChangedAt >= scanDelays[scansDone + 1] then
-            scansDone += 1
-            scanCount = count
+
+        if scansDone < #scanDelays then
+            if now - mapChangedAt >= scanDelays[scansDone + 1] then
+                scansDone += 1
+                nextFullScan = now + fullScanInterval
+                task.spawn(FullScan, map, address)
+            end
+        elseif now >= nextFullScan then
+            nextFullScan = now + fullScanInterval
             task.spawn(FullScan, map, address)
         end
     end
@@ -2216,7 +2233,7 @@ do
 
     highlighting:slider({Name = "Highlight render distance", Flag = "HighlightDistance", Min = 25, Max = 1000, Default = highlightDistance, Step = 25})
     FlagSetters.HighlightDistance = function(val)
-        highlightDistance = val
+        highlightDistance = tonumber(val) or 1000
     end
 
     highlighting:toggle({Name = "Highlight fill", Flag = "HighlightFill", Default = false})
