@@ -49,6 +49,7 @@ local attackAnimations = {
     ["129626174716003"] = {Name = "Slash"}, -- Slasher
     ["135002183282873"] = {Name = "Slash"}, -- Cure
     ["125430111937587"] = {Name = "Slash"}, -- Abysswalker
+    ["100014992013740"] = {Name = "Lunge", Linger = 1.1},
     ["104540716539347"] = {Name = "Slash"}, -- Killer2
     ["93902163029544"] = {Name = "Slash"}, -- Killer
     ["83333467665074"] = {Name = "Slash"}, -- Butcher
