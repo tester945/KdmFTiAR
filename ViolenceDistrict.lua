@@ -169,6 +169,16 @@ local function PartPose(part)
     return {Parent = true, PartSize = sizeVector, Position = positionVector, RightVector = right, UpVector = up, LookVector = look}
 end
 
+local function PartPosition(part)
+    local primitive = part and ReadU64(tonumber(part.Data), O.BasePart.Primitive)
+    if not IsHeapPointer(primitive) then return nil end
+    local ok, data = pcall(memory.readbuffer, primitive, O.Primitive.Position, 12)
+    if not ok or not data then return nil end
+    local x, y, z = buffer.readf32(data, 0), buffer.readf32(data, 4), buffer.readf32(data, 8)
+    if x ~= x or y ~= y or z ~= z or math.abs(x) > 1e6 or math.abs(y) > 1e6 or math.abs(z) > 1e6 then return nil end
+    return vector.create(x, y, z)
+end
+
 local function ReadStdString(address, maxSize)
     local size = ReadU64(address, 0x10)
     local capacity = ReadU64(address, 0x18)
@@ -875,10 +885,11 @@ local function CheckAttack(now)
     end
     if now < activeAttack.Starts or now - lastParry < parryCooldown or not parryLocalRoot then return end
 
-    local killerRoot = parryKiller.Root
-    local killerPos = killerRoot.Position
-    local localPos = PastLocalPosition(now) or parryLocalRoot.Position
-    local Inside = BuildParryTest(killerPos, killerRoot.LookVector, activeAttack.Config)
+    local killerPose = PartPose(parryKiller.Root)
+    local localPos = PastLocalPosition(now) or PartPosition(parryLocalRoot)
+    if not killerPose or not localPos then return end
+    local killerPos = killerPose.Position
+    local Inside = BuildParryTest(killerPos, killerPose.LookVector, activeAttack.Config)
     if not Inside or not Inside(localPos) then return end
 
     local attack = activeAttack
@@ -908,12 +919,15 @@ local function UpdateParry(now)
         return
     end
 
-    UpdateKillerVelocity(parryKiller, parryKiller.Root.Position, now)
+    local killerPosition = PartPosition(parryKiller.Root)
+    parryKiller.Readable = killerPosition ~= nil
+    if killerPosition then UpdateKillerVelocity(parryKiller, killerPosition, now) end
 
-    if parryLocalRoot then
+    local localPosition = parryLocalRoot and PartPosition(parryLocalRoot)
+    if localPosition then
         local last = parryHistory[#parryHistory]
         if last and now - last.Time > .5 then table.clear(parryHistory) end
-        parryHistory[#parryHistory + 1] = {Time = now, Position = parryLocalRoot.Position}
+        parryHistory[#parryHistory + 1] = {Time = now, Position = localPosition}
         while #parryHistory > 2 and now - parryHistory[2].Time >= parryHistoryTime do
             table.remove(parryHistory, 1)
         end
@@ -955,7 +969,7 @@ end
 
 local function RenderParryRange()
     local killer = parryKiller
-    if not killer or not parryLocalRoot or not killer.Velocity or parryLocalTeam ~= "Survivors" then return end
+    if not killer or not killer.Readable or not parryLocalRoot or not killer.Velocity or parryLocalTeam ~= "Survivors" then return end
 
     local killerPos = killer.Root.Position
     local origin = killerPos
@@ -991,7 +1005,7 @@ end
 local bDaggerTrajectory = true
 local daggerColor = Color3.fromRGB(170, 120, 255)
 local daggerEndColor = Color3.fromRGB(255, 80, 80)
-local UpdateDaggerAim, RenderDaggerTrajectory, BuildDaggerGradient, UpdateThrownDaggers, RenderThrownDaggers
+local UpdateDaggerAim, RenderDaggerTrajectory, BuildDaggerGradient
 
 do
     local aimAnimations = {
@@ -1026,7 +1040,7 @@ do
     local throwers = {}
     local targets = {}
     local arcPoints = {}
-    local ownRoot, ownIsSurvivor
+    local ownRoot, ownIsSurvivor, ownReadable
     local nextRefresh = 0
 
     local function AnimatorOf(character)
@@ -1136,9 +1150,15 @@ do
     end
     BuildDaggerGradient()
 
-    local function BodyShape(target, t)
-        local head = target.Head.Position
-        local left, right = target.LeftLeg.Position, target.RightLeg.Position
+    local function BodyShape(target, t, inRender)
+        local head, left, right
+        if inRender then
+            if not target.Readable then return nil end
+            head, left, right = target.Head.Position, target.LeftLeg.Position, target.RightLeg.Position
+        else
+            head, left, right = PartPosition(target.Head), PartPosition(target.LeftLeg), PartPosition(target.RightLeg)
+            if not head or not left or not right then return nil end
+        end
         local feet = (left + right) / 2
         local bottom = math.min(left.Y, right.Y) - legHalfHeight
         local velocity = target.Motion.Velocity
@@ -1165,6 +1185,7 @@ do
 
     local function SegmentHits(a, b, target, t)
         local head, feet, bottom, top = BodyShape(target, t)
+        if not head then return false end
         for i = 0, hitSamples do
             if PointInBody(a + (b - a) * (i / hitSamples), head, feet, bottom, top) then return true end
         end
@@ -1176,7 +1197,9 @@ do
         local best, bestDistance
         local centreX = screenCentre.X
         for _, target in targets do
-            local screen, visible = camera:WorldToScreenPoint(target.Root.Position)
+            local position = PartPosition(target.Root)
+            local screen, visible
+            if position then screen, visible = camera:WorldToScreenPoint(position) end
             if visible then
                 local distance = math.abs(screen.X - centreX)
                 if not bestDistance or distance < bestDistance then
@@ -1233,79 +1256,6 @@ do
         end
     end
 
-    local pastGradient = {}
-    for i = 0, gradientSteps do
-        pastGradient[i] = Color3.fromRGB(230, 110, 0):Lerp(Color3.fromRGB(255, 200, 130), i / gradientSteps)
-    end
-    local thrown = {}
-    local workspaceChildren = {}
-    local workspaceAddress
-    local maxPathPoints = 400
-
-    local function SpearPosition(primitive)
-        local okX, x = pcall(memory.readf32, primitive, O.Primitive.Position)
-        local okY, y = pcall(memory.readf32, primitive, O.Primitive.Position + 4)
-        local okZ, z = pcall(memory.readf32, primitive, O.Primitive.Position + 8)
-        if okX and okY and okZ and x == x and y == y and z == z then return vector.create(x, y, z) end
-    end
-
-    UpdateThrownDaggers = function(now)
-        workspaceAddress = workspaceAddress or tonumber(workspace.Data)
-        local raw = RawChildren(workspaceAddress)
-        if not raw then return end
-
-        for address in raw do
-            if not workspaceChildren[address] then
-                workspaceChildren[address] = true
-                local inst = pointer_to_userdata(address)
-                if inst.Name == "Spear" then
-                    thrown[address] = {Model = inst, Path = {}, Started = now}
-                end
-            end
-        end
-        for address in workspaceChildren do
-            if not raw[address] then
-                workspaceChildren[address] = nil
-                thrown[address] = nil
-            end
-        end
-
-        for _, spear in thrown do
-            if not spear.Primitive then
-                local part = spear.Model:FindFirstChild("Spear1")
-                local primitive = part and ReadU64(tonumber(part.Data), O.BasePart.Primitive)
-                if IsHeapPointer(primitive) then spear.Primitive = primitive end
-            end
-            local position = spear.Primitive and SpearPosition(spear.Primitive)
-            if position then
-                local path = spear.Path
-                local last = path[#path]
-                if (not last or vector.magnitude(position - last) > .05) and #path < maxPathPoints then
-                    path[#path + 1] = position
-                end
-            end
-        end
-    end
-
-    local function DrawPath(path, count, colors)
-        local previous
-        for i = 1, count do
-            local screen, visible = camera:WorldToScreenPoint(path[i])
-            local current = visible and vector.create(screen.X, screen.Y, 0) or nil
-            if current and previous then
-                DrawingImmediate.Line(previous, current, colors[math.floor((i - 1) / math.max(1, count - 1) * gradientSteps)], 1, 2, 1)
-            end
-            previous = current
-        end
-    end
-
-    RenderThrownDaggers = function()
-        for _, spear in thrown do
-            local path = spear.Path
-            if #path > 1 then DrawPath(path, #path, pastGradient) end
-        end
-    end
-
     UpdateDaggerAim = function(now)
         if now >= nextRefresh then
             nextRefresh = now + refreshInterval
@@ -1329,16 +1279,23 @@ do
                 if target then
                     local _, _, bottom = BodyShape(target)
                     endY = bottom
-                elseif ownRoot then
-                    endY = ownRoot.Position.Y - groundOffset
+                else
+                    local ownPosition = PartPosition(ownRoot)
+                    endY = ownPosition and ownPosition.Y - groundOffset
                 end
                 thrower.EndY = endY
                 thrower.Hit = DrawArc(camera.Position, camera.LookVector * daggerSpeed, nil, endY, "Compute") == true
             end
         end
         for _, target in targets do
-            UpdateKillerVelocity(target.Motion, target.Root.Position, now)
+            local position = PartPosition(target.Root)
+            target.Readable = position ~= nil and PartPosition(target.Head) ~= nil and PartPosition(target.LeftLeg) ~= nil and PartPosition(target.RightLeg) ~= nil
+            if position then UpdateKillerVelocity(target.Motion, position, now) end
         end
+        for _, thrower in throwers do
+            thrower.Readable = PartPosition(thrower.Root) ~= nil
+        end
+        ownReadable = PartPosition(ownRoot) ~= nil
     end
 
     RenderDaggerTrajectory = function()
@@ -1347,10 +1304,10 @@ do
                 if thrower.IsLocal then
                     DrawArc(camera.Position, camera.LookVector * daggerSpeed, camera.RightVector * localRightOffset + camera.LookVector * localForwardOffset, thrower.EndY, thrower.Hit == true, if thrower.Focal then thrower else nil)
                 else
-                    local origin = thrower.Root.Position + vector.create(0, daggerHeight, 0)
-                    local look = thrower.Root.LookVector
+                    local origin = thrower.Readable and thrower.Root.Position + vector.create(0, daggerHeight, 0)
+                    local look = thrower.Readable and thrower.Root.LookVector or vector.zero
                     local flat = vector.create(look.X, 0, look.Z)
-                    if vector.magnitude(flat) > .01 then
+                    if origin and vector.magnitude(flat) > .01 then
                         flat = vector.normalize(flat)
                         local bestRoot, bestEndY, bestDot
                         local function Consider(root, endY)
@@ -1363,15 +1320,15 @@ do
                             end
                         end
                         for _, target in targets do
-                            if target.Team == "Survivors" then
-                                local _, _, bottom = BodyShape(target)
+                            if target.Team == "Survivors" and target.Readable then
+                                local _, _, bottom = BodyShape(target, nil, true)
                                 Consider(target.Root, bottom)
                             end
                         end
-                        if ownIsSurvivor and ownRoot then Consider(ownRoot, ownRoot.Position.Y - groundOffset) end
+                        if ownIsSurvivor and ownRoot and ownReadable then Consider(ownRoot, ownRoot.Position.Y - groundOffset) end
                         local angle, endY = 0, nil
-                        if bestRoot then
-                            local aim = bestRoot.Position
+                        local aim = bestRoot and bestRoot.Position
+                        if aim then
                             angle = LaunchAngle(vector.magnitude(vector.create(aim.X - origin.X, 0, aim.Z - origin.Z)), aim.Y - origin.Y)
                             endY = bestEndY
                         end
@@ -1688,7 +1645,8 @@ do
             return
         end
 
-        local me = localRoot.Position
+        local me = PartPosition(localRoot)
+        if not me then return end
         for _, wave in waves do
             local position = WavePosition(wave.Primitive)
             if position then
@@ -1771,7 +1729,8 @@ do
         end
         if not localIsSurvivor or not killerRoot or not localRoot or now < nextPress then return end
 
-        local killerPos, localPos = killerRoot.Position, localRoot.Position
+        local killerPos, localPos = PartPosition(killerRoot), PartPosition(localRoot)
+        if not killerPos or not localPos then return end
 
         for _, entry in pallets do
             local box = entry.Hitbox
@@ -2071,10 +2030,7 @@ local function Render()
     if bInfoHud then RenderInfoHud() end
     if not camera then return end
 
-    if bDaggerTrajectory then
-        RenderDaggerTrajectory()
-        RenderThrownDaggers()
-    end
+    if bDaggerTrajectory then RenderDaggerTrajectory() end
     if bTrapESP then RenderTraps() end
 
     local flashLeft = parryFlashUntil - os.clock()
@@ -2302,10 +2258,7 @@ task.spawn(function()
                 view.TanY, view.TanX = tanY, tanY * viewport.X / math.max(viewport.Y, 1)
             end
             if bParryDetect or bShowParryRange then UpdateParry(os.clock()) end
-            if bDaggerTrajectory then
-                UpdateDaggerAim(os.clock())
-                UpdateThrownDaggers(os.clock())
-            end
+            if bDaggerTrajectory then UpdateDaggerAim(os.clock()) end
             if bAutoSkillCheck then UpdateSkillCheck() end
             if bGeneratorESP or bInfoHud then UpdateGenerators() end
             if bInfoHud then UpdateInfoHud(os.clock()) end
