@@ -46,6 +46,8 @@ local loopInterval = 1 / 60
 local bDebugStats = false
 local vault = {Enabled = false}
 local bMoonwalk = false
+local bPumpkinESP = true
+local pumpkinColor = Color3.fromRGB(255, 165, 40)
 
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
@@ -90,11 +92,11 @@ local attackAnimations = {
     ["84926129581106"] = {Name = "Veil"},
     ["113255068724446"] = {Name = "Hidden"},
 }
-local attackDefaults = {Windup = 0, Linger = .8, Length = 5.4, Height = 7}
+local attackDefaults = {Windup = 0, Linger = .8, Height = 7}
 local parrySafety = .1
 local localRadius = 1.5
 local localHalfHeight = 2.5
-local parryHistoryTime = .3
+local parryTuning = {Prediction = 0, Range = 6.9, HumanizeMs = 60, PastTime = .3}
 local parryCooldown = 1
 local parryRangeColor = Color3.fromRGB(255, 255, 255)
 local parryAttackColor = Color3.fromRGB(255, 70, 70)
@@ -919,7 +921,7 @@ local function PastLocalPosition(now)
     local history = parry.History
     local chosen = history[1]
     for i = #history, 1, -1 do
-        if now - history[i].Time >= parryHistoryTime then
+        if now - history[i].Time >= parryTuning.PastTime then
             chosen = history[i]
             break
         end
@@ -927,8 +929,19 @@ local function PastLocalPosition(now)
     return chosen and chosen.Position
 end
 
+local function PredictedKiller(position)
+    local velocity = parry.KillerVelocity
+    if not position or not velocity or parryTuning.Prediction <= 0 then return position end
+    return position + velocity * parryTuning.Prediction
+end
+
+local function AttackRadius(config)
+    if config and config.Length then return config.Length + localRadius end
+    return parryTuning.Range
+end
+
 local function PressParry()
-    local delay = math.max(0, math.random(-60, 60) / 1000)
+    local delay = math.random(0, math.max(0, math.floor(parryTuning.HumanizeMs))) / 1000
     if delay > 0 then wait(delay) end
     mouse2press()
     wait(.07)
@@ -938,12 +951,12 @@ end
 local function CheckAttack(now)
     local attack = parry.Attack
     if not attack or now < attack.Starts or now - parry.LastParry < parryCooldown then return end
-    local killerPosition = parry.KillerPosition
+    local killerPosition = PredictedKiller(parry.KillerPosition)
     local localPosition = PastLocalPosition(now) or parry.LocalPosition
     if not killerPosition or not localPosition then return end
     local offset = localPosition - killerPosition
     local config = attack.Config
-    local radius = (config.Length or attackDefaults.Length) + localRadius
+    local radius = AttackRadius(config)
     local height = config.Height or attackDefaults.Height
     if math.abs(offset.Y) > height / 2 + localHalfHeight then return end
     if Vector3.new(offset.X, 0, offset.Z).Magnitude > radius then return end
@@ -965,13 +978,22 @@ local function UpdateParry(now)
         parry.Killer, parry.Attack, parry.NextRefresh = nil, nil, 0
         return false
     end
+    local elapsed = now - (parry.LastKillerTime or 0)
+    if parry.LastKillerPosition and elapsed > 0 and elapsed < .5 then
+        local delta = (parry.KillerPosition - parry.LastKillerPosition) / elapsed
+        local flat = Vector3.new(delta.X, 0, delta.Z)
+        parry.KillerVelocity = if parry.KillerVelocity then parry.KillerVelocity:Lerp(flat, .3) else flat
+    else
+        parry.KillerVelocity = nil
+    end
+    parry.LastKillerPosition, parry.LastKillerTime = parry.KillerPosition, now
     parry.LocalPosition = parry.LocalRoot and parry.LocalRoot.Position
     local history = parry.History
     if parry.LocalPosition then
         local last = history[#history]
         if last and now - last.Time > .5 then table.clear(history) end
         history[#history + 1] = {Time = now, Position = parry.LocalPosition}
-        while #history > 2 and now - history[2].Time >= parryHistoryTime do
+        while #history > 2 and now - history[2].Time >= parryTuning.PastTime do
             table.remove(history, 1)
         end
     end
@@ -990,10 +1012,9 @@ end
 local function RenderParry()
     local killer = parry.Killer
     if not killer or parry.Team ~= "Survivors" or not parry.KillerPosition then return end
-    local position = killer.Root.Position or parry.KillerPosition
+    local position = PredictedKiller(killer.Root.Position or parry.KillerPosition)
     local attack = parry.Attack
-    local config = attack and attack.Config or attackDefaults
-    local radius = (config.Length or attackDefaults.Length) + localRadius
+    local radius = AttackRadius(attack and attack.Config or attackDefaults)
     local color = if attack then parryAttackColor else parryRangeColor
     local cx, cy, cz = position.X, position.Y, position.Z
     local firstX, firstY = Project(cx + radius, cy, cz)
@@ -1010,7 +1031,7 @@ local function RenderParry()
     end
     if attack then
         local x, y = Project(cx, cy + 4, cz)
-        if x then DrawText(x, y, config.Name, parryAttackColor) end
+        if x then DrawText(x, y, attack.Config.Name, parryAttackColor) end
     end
 end
 
@@ -1040,6 +1061,7 @@ do
     local hitRadius = 1.8
     local legHalfHeight = 1
     local headTop = .5
+    local dominanceRatio = 2.5
     local hitSamples = 4
     local throwers, targets, motions = {}, {}, {}
     local ownRoot, ownIsSurvivor
@@ -1248,6 +1270,20 @@ do
         end
     end
 
+    local function DominantIndex(origin, positions)
+        local nearest, nearestDistance, secondDistance
+        for index, position in positions do
+            local distance = (position - origin).Magnitude
+            if not nearestDistance or distance < nearestDistance then
+                nearest, nearestDistance, secondDistance = index, distance, nearestDistance
+            elseif not secondDistance or distance < secondDistance then
+                secondDistance = distance
+            end
+        end
+        if nearest and (not secondDistance or nearestDistance * dominanceRatio <= secondDistance) then return nearest end
+        return nil
+    end
+
     local function TargetBody()
         if not frame.Ready then return nil end
         local best, bestDistance
@@ -1287,11 +1323,20 @@ do
                 bestPosition, bestEndY, bestDot = position, endY, dot
             end
         end
+        local positions, ends = {}, {}
         for _, target in targets do
-            if target.Team == "Survivors" and target.Position then Consider(target.Position, target.Bottom) end
+            if target.Team == "Survivors" and target.Position then
+                positions[#positions + 1], ends[#ends + 1] = target.Position, target.Bottom
+            end
         end
         local ownPosition = ownIsSurvivor and ownRoot and ownRoot.Position
-        if ownPosition then Consider(ownPosition, ownPosition.Y - groundOffset) end
+        if ownPosition then positions[#positions + 1], ends[#ends + 1] = ownPosition, ownPosition.Y - groundOffset end
+        local dominant = DominantIndex(origin, positions)
+        if dominant then
+            bestPosition, bestEndY = positions[dominant], ends[dominant]
+        else
+            for index, position in positions do Consider(position, ends[index]) end
+        end
         local angle = 0
         if bestPosition then
             angle = LaunchAngle(Vector3.new(bestPosition.X - origin.X, 0, bestPosition.Z - origin.Z).Magnitude, bestPosition.Y - origin.Y)
@@ -1919,6 +1964,86 @@ local function PrintStats(now)
     stats.Next = now + 5
 end
 
+local UpdatePumpkins, RenderPumpkins
+
+do
+    local pumpkins, circles = {}, {}
+    local nextScan = 0
+    local scanInterval = 2
+
+    UpdatePumpkins = function(map, now)
+        if now < nextScan then return end
+        nextScan = now + scanInterval
+        local folder = map and map:FindFirstChild("Pumpkins")
+        local found = {}
+        for _, model in folder and folder:GetChildren() or {} do
+            local address = model.Address
+            local entry = pumpkins[address]
+            if not entry then
+                local shell = model:FindFirstChild("shell")
+                local position, size = shell and shell.Position, shell and shell.Size
+                if position and size then
+                    entry = {X = position.X, Y = position.Y, Z = position.Z, Radius = math.max(size.X, size.Y, size.Z) / 2}
+                end
+            end
+            found[address] = entry
+        end
+        pumpkins = found
+        local count = 0
+        for _ in found do count += 1 end
+        while #circles < count do
+            local object = Drawing.new("Circle")
+            object.Thickness = outlineThickness
+            object.NumSides = 32
+            object.Filled = false
+            object.Transparency = 1
+            object.Visible = false
+            allDrawings[#allDrawings + 1] = object
+            circles[#circles + 1] = {Object = object, Visible = false}
+        end
+    end
+
+    RenderPumpkins = function(visible)
+        local used = 0
+        if visible then
+            for _, pumpkin in pumpkins do
+                local depth = (pumpkin.X - frame.PX) * frame.LX + (pumpkin.Y - frame.PY) * frame.LY + (pumpkin.Z - frame.PZ) * frame.LZ
+                local x, y
+                if depth > .5 then x, y = Project(pumpkin.X, pumpkin.Y, pumpkin.Z) end
+                local entry = x and y and circles[used + 1]
+                if entry then
+                    used += 1
+                    local radius = math.max(pumpkin.Radius * frame.Focal / depth, 2)
+                    local object = entry.Object
+                    if entry.X ~= x or entry.Y ~= y then
+                        entry.X, entry.Y = x, y
+                        object.Position = Vector2.new(x, y)
+                    end
+                    if entry.Radius ~= radius then
+                        entry.Radius = radius
+                        object.Radius = radius
+                    end
+                    if entry.Color ~= pumpkinColor then
+                        entry.Color = pumpkinColor
+                        object.Color = pumpkinColor
+                    end
+                    if not entry.Visible then
+                        entry.Visible = true
+                        object.Visible = true
+                    end
+                end
+            end
+        end
+        for index = used + 1, #circles do
+            local entry = circles[index]
+            if entry.Visible then
+                entry.Visible = false
+                entry.Object.Visible = false
+            end
+        end
+    end
+end
+
 local function Render()
     local started = os.clock()
     usedLines, usedTexts, usedTriangles = 0, 0, 0
@@ -1943,6 +2068,7 @@ local function Render()
         if bShowParryRange then RenderParry() end
         if bDaggerTrajectory then RenderDaggerTrajectory() end
     end
+    RenderPumpkins(bPumpkinESP and frame.Ready and not vault.Scanning)
     RenderInfoHud(bInfoHud and not vault.Scanning)
     if usedLines > wantedLines then wantedLines = usedLines end
     if usedTexts > wantedTexts then wantedTexts = usedTexts end
@@ -2030,6 +2156,7 @@ AddJob("Main", false, function()
             if bAutoPallet then UpdateAutoPallet(tick()) end
             if bAutoCrouch then UpdateAutoCrouch(tick()) else ReleaseCrouch() end
             if bZombieESP then UpdateZombiePositions() end
+            if bPumpkinESP then UpdatePumpkins(map, tick()) end
             if bInfoHud then UpdateInfoHud(tick()) end
             if bWindowESP and map and stableScans < windowStableScans and tick() >= nextWindowScan then
                 local count = ScanWindows(map)
@@ -2378,6 +2505,11 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_crouch = bAutoCrouch,
         vd_vault = vault.Enabled,
         vd_moonwalk = bMoonwalk,
+        vd_pumpkin = bPumpkinESP,
+        vd_parry_pred = parryTuning.Prediction,
+        vd_parry_dist = parryTuning.Range,
+        vd_parry_human = parryTuning.HumanizeMs,
+        vd_parry_lag = parryTuning.PastTime,
     }
     local apply = {
         vd_gen = function(v) bGeneratorESP = v == true end,
@@ -2398,6 +2530,11 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_crouch = function(v) bAutoCrouch = v == true end,
         vd_vault = function(v) vault.Enabled = v == true end,
         vd_moonwalk = function(v) bMoonwalk = v == true end,
+        vd_pumpkin = function(v) bPumpkinESP = v == true end,
+        vd_parry_pred = function(v) parryTuning.Prediction = math.clamp(tonumber(v) or 0, 0, .5) end,
+        vd_parry_dist = function(v) parryTuning.Range = math.clamp(tonumber(v) or 6.9, 2, 15) end,
+        vd_parry_human = function(v) parryTuning.HumanizeMs = math.clamp(tonumber(v) or 60, 0, 200) end,
+        vd_parry_lag = function(v) parryTuning.PastTime = math.clamp(tonumber(v) or .3, 0, .6) end,
     }
     local colours = {
         vd_gen_col = function(c) generatorColor = c end,
@@ -2407,6 +2544,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_win_col = function(c) windowColor = c end,
         vd_trap_col = function(c) trapColor = c end,
         vd_zombie_col = function(c) zombieColor = c end,
+        vd_pumpkin_col = function(c) pumpkinColor = c end,
         vd_dagger_start = function(c)
             daggerColor = c
             RebuildDaggerGradient()
@@ -2482,6 +2620,8 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         Picker(esp, "vd_trap_col", trapColor)
         Toggle(esp, "vd_zombie", "Cure zombie skeleton ESP")
         Picker(esp, "vd_zombie_col", zombieColor)
+        Toggle(esp, "vd_pumpkin", "Pumpkin ESP")
+        Picker(esp, "vd_pumpkin_col", pumpkinColor)
         Toggle(esp, "vd_dagger", "Veil dagger trajectory")
         Picker2(esp, "vd_dagger_start", daggerColor, "vd_dagger_end", daggerEndColor)
         Toggle(esp, "vd_hud", "Info HUD")
@@ -2493,12 +2633,18 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
 
         local main = Section(tab, "Main", "Right")
         Toggle(main, "vd_skill", "Auto skill check")
-        Toggle(main, "vd_parry", "React parry")
-        Toggle(main, "vd_parry_range", "Show parry range")
-        Picker(main, "vd_parry_col", parryRangeColor)
         Toggle(main, "vd_auto_pallet", "Auto drop pallet on killer")
         Toggle(main, "vd_crouch", "Auto crouch (against Abysswalker)")
         Toggle(main, "vd_moonwalk", "Moonwalk (hold S)")
+
+        local parrying = Section(tab, "React parry", "Right")
+        Toggle(parrying, "vd_parry", "React parry")
+        Toggle(parrying, "vd_parry_range", "Show parry range")
+        Picker(parrying, "vd_parry_col", parryRangeColor)
+        Widget(parrying, "SliderFloat", "vd_parry_pred", "vd_parry_pred", "Killer prediction (s)", 0, .5, defaults.vd_parry_pred, "%.2f")
+        Widget(parrying, "SliderFloat", "vd_parry_dist", "vd_parry_dist", "Range (studs)", 2, 15, defaults.vd_parry_dist, "%.1f")
+        Widget(parrying, "SliderInt", "vd_parry_human", "vd_parry_human", "Humanize (max ms)", 0, 200, defaults.vd_parry_human)
+        Widget(parrying, "SliderFloat", "vd_parry_lag", "vd_parry_lag", "Ping compensation (s)", 0, .6, defaults.vd_parry_lag, "%.2f")
 
         local vaulting = Section(tab, "Fast vault", "Right")
         if vault.Ready then
