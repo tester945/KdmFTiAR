@@ -7,6 +7,7 @@ local completedColor = Color3.fromRGB(80, 220, 100)
 local repairingColor = Color3.fromRGB(255, 220, 60)
 local regressingColor = Color3.fromRGB(255, 60, 60)
 local textSize = 14
+local textFont = Drawing.Fonts and (Drawing.Fonts.SystemBold or Drawing.Fonts.System)
 local bGeneratorESP = true
 local bPalletESP = true
 local bWindowESP = true
@@ -22,7 +23,7 @@ local bAutoPallet = true
 local bAutoCrouch = true
 local bInfoHud = true
 local bKickedColor = true
-local bHighlightFill = false
+local bHighlightFill = true
 local bHighlightOutline = true
 local highlightDistance = 1000
 local fillOpacity = .35
@@ -43,6 +44,7 @@ local minimumWindows = 3
 local palletPollInterval = .125
 local loopInterval = 1 / 60
 local bDebugStats = false
+local vault = {Enabled = false, Sprint = false}
 
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
@@ -118,6 +120,10 @@ local function Valid(pointer)
     return pointer ~= nil and pointer > 0x10000 and pointer < 0x7FFFFFFFFFFF
 end
 
+local function NextSlot(now, phase)
+    return (math.floor((now - phase) / .5) + 1) * .5 + phase
+end
+
 local parry = {History = {}, LastParry = 0, NextRefresh = 0, AnimationIds = {}}
 local world = {NextRefresh = 0, NextKillerType = 0, KillerType = ""}
 
@@ -145,6 +151,30 @@ end
 local function MemoryName(address)
     local pointer = memory_read("uintptr_t", address + nameOffset)
     return if Valid(pointer) then ReadStdString(pointer) else ""
+end
+
+if memoryReady then
+    local samples = workspace:GetChildren()
+    local function NameOffsetWorks(offset)
+        if #samples == 0 then return false end
+        for i = 1, math.min(#samples, 5) do
+            local pointer = memory_read("uintptr_t", samples[i].Address + offset)
+            if not Valid(pointer) or ReadStdString(pointer) ~= samples[i].Name then return false end
+        end
+        return true
+    end
+    if not NameOffsetWorks(nameOffset) then
+        local found
+        for offset = 0, 0x200, 8 do
+            if NameOffsetWorks(offset) then
+                found = offset
+                break
+            end
+        end
+        print(string.format("[MatchaVD] Instance.Name offset 0x%X is wrong, using %s", nameOffset, if found then string.format("0x%X", found) else "nothing (memory scans off)"))
+        nameOffset = found
+        memoryReady = found ~= nil
+    end
 end
 
 local function MemoryChildNames(address)
@@ -190,7 +220,7 @@ end
 
 local function ReadGenerator(generator)
     local pose = PartPose(generator:FindFirstChild("GeneratorBody"), generatorSize)
-    return pose and {Pose = pose, Model = generator, Text = "", NextPoll = 0, RisingUntil = 0, FallingUntil = 0}
+    return pose and {Pose = pose, Model = generator, Text = "", NextPoll = tick() + math.random() * progressPollInterval, RisingUntil = 0, FallingUntil = 0}
 end
 
 local function ReadPallet(pallet)
@@ -278,6 +308,9 @@ local function UpdateGenerators(now)
             entry.NextPoll = now + progressPollInterval
             local progress = tonumber(entry.Model:GetAttribute("RepairProgress"))
             if progress then
+                if progress < 100 and tostring(entry.Model:GetAttribute("Regressing")) == "true" then
+                    entry.FallingUntil = now + progressStateTime
+                end
                 local last = entry.Progress
                 if last and progress > last + .01 then
                     entry.RisingUntil = now + progressStateTime
@@ -382,7 +415,10 @@ local function UpdateCamera(now)
         frame.NextLens = now + .25
         local viewport = camera.ViewportSize
         frame.HalfWidth, frame.HalfHeight = viewport.X / 2, viewport.Y / 2
-        frame.Focal = viewport.Y / 2 / math.tan(math.rad(camera.FieldOfView) / 2)
+    end
+    if not frame.NextFov or now >= frame.NextFov then
+        frame.NextFov = now + .05
+        frame.Focal = frame.HalfHeight / math.tan(math.rad(camera.FieldOfView) / 2)
     end
     frame.Ready = true
 end
@@ -406,7 +442,6 @@ local function DrawLine(x1, y1, x2, y2, color)
     usedLines += 1
     local entry = lines[usedLines]
     if not entry then return end
-    x1, y1, x2, y2 = math.floor(x1 + .5), math.floor(y1 + .5), math.floor(x2 + .5), math.floor(y2 + .5)
     if entry.X1 ~= x1 or entry.Y1 ~= y1 then
         entry.X1, entry.Y1 = x1, y1
         entry.Object.From = Vector2.new(x1, y1)
@@ -434,6 +469,7 @@ local function GrowTexts()
     for _ = 1, 2 do
         if #texts >= wantedTexts then return end
         local object = Drawing.new("Text")
+        if textFont then object.Font = textFont end
         object.Size = textSize
         object.Center = true
         object.Outline = true
@@ -447,7 +483,6 @@ local function DrawText(x, y, text, color)
     usedTexts += 1
     local entry = texts[usedTexts]
     if not entry then return end
-    x, y = math.floor(x + .5), math.floor(y + .5)
     if entry.X ~= x or entry.Y ~= y then
         entry.X, entry.Y = x, y
         entry.Object.Position = Vector2.new(x, y)
@@ -486,7 +521,6 @@ local function DrawTriangle(x1, y1, x2, y2, x3, y3, color)
     usedTriangles += 1
     local entry = triangles[usedTriangles]
     if not entry then return end
-    x1, y1, x2, y2, x3, y3 = math.floor(x1 + .5), math.floor(y1 + .5), math.floor(x2 + .5), math.floor(y2 + .5), math.floor(x3 + .5), math.floor(y3 + .5)
     if entry.X1 ~= x1 or entry.Y1 ~= y1 then
         entry.X1, entry.Y1 = x1, y1
         entry.Object.PointA = Vector2.new(x1, y1)
@@ -510,14 +544,8 @@ local function DrawTriangle(x1, y1, x2, y2, x3, y3, color)
 end
 
 local function DrawLabel(pose, text, color)
-    local x, y, z = pose.CX - frame.PX, pose.CY - frame.PY, pose.CZ - frame.PZ
-    local depth = x * frame.LX + y * frame.LY + z * frame.LZ
-    if depth < .1 then return end
-    local scale = frame.Focal / depth
-    local sx = frame.HalfWidth + (x * frame.RX + y * frame.RY + z * frame.RZ) * scale
-    local sy = frame.HalfHeight - (x * frame.UX + y * frame.UY + z * frame.UZ) * scale
-    if sx < 0 or sy < 0 or sx > frame.HalfWidth * 2 or sy > frame.HalfHeight * 2 then return end
-    DrawText(sx, sy, text, color)
+    local screen, visible = WorldToScreen(Vector3.new(pose.CX, pose.CY, pose.CZ))
+    if visible then DrawText(screen.X, screen.Y, text, color) end
 end
 
 local screenX, screenY = table.create(8), table.create(8)
@@ -546,12 +574,19 @@ local function Highlight(pose, color, anyDistance)
     local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
     for i = 1, 8 do
         local base = i * 3 - 2
-        local x, y, z = corners[base] - px, corners[base + 1] - py, corners[base + 2] - pz
+        local wx, wy, wz = corners[base], corners[base + 1], corners[base + 2]
+        local x, y, z = wx - px, wy - py, wz - pz
         local depth = x * lx + y * ly + z * lz
         if depth < .1 then return end
-        local scale = focal / depth
-        local sx = halfWidth + (x * rx + y * ry + z * rz) * scale
-        local sy = halfHeight - (x * ux + y * uy + z * uz) * scale
+        local sx, sy
+        local screen, visible = WorldToScreen(Vector3.new(wx, wy, wz))
+        if visible then
+            sx, sy = screen.X, screen.Y
+        else
+            local scale = focal / depth
+            sx = halfWidth + (x * rx + y * ry + z * rz) * scale
+            sy = halfHeight - (x * ux + y * uy + z * uz) * scale
+        end
         screenX[i], screenY[i] = sx, sy
         if sx < minX then minX = sx end
         if sx > maxX then maxX = sx end
@@ -601,10 +636,12 @@ local function Highlight(pose, color, anyDistance)
     end
 end
 
-local function Project(x, y, z, minDepth)
-    x, y, z = x - frame.PX, y - frame.PY, z - frame.PZ
+local function Project(wx, wy, wz, minDepth)
+    local x, y, z = wx - frame.PX, wy - frame.PY, wz - frame.PZ
     local depth = x * frame.LX + y * frame.LY + z * frame.LZ
     if depth < (minDepth or .1) then return nil end
+    local screen, visible = WorldToScreen(Vector3.new(wx, wy, wz))
+    if visible then return screen.X, screen.Y end
     local scale = frame.Focal / depth
     return frame.HalfWidth + (x * frame.RX + y * frame.RY + z * frame.RZ) * scale, frame.HalfHeight - (x * frame.UX + y * frame.UY + z * frame.UZ) * scale
 end
@@ -622,6 +659,7 @@ local function RefreshParry()
     parry.HasDagger = parry.LocalRoot ~= nil and (character:FindFirstChild("Parrying Dagger") ~= nil or player:GetAttribute("EquippedItem") == "Parrying Dagger")
     local killer
     for _, other in Players:GetPlayers() do
+        task.wait()
         if other ~= player and TeamName(other) == "Killer" then
             local killerCharacter = other.Character
             local humanoid = killerCharacter and killerCharacter:FindFirstChild("Humanoid")
@@ -698,10 +736,10 @@ local function PastLocalPosition(now)
 end
 
 local function PressParry()
-    local delay = math.max(0, math.random(-80, 80) / 1000)
+    local delay = math.max(0, math.random(-60, 60) / 1000)
     if delay > 0 then wait(delay) end
     mouse2press()
-    wait(.1)
+    wait(.07)
     mouse2release()
 end
 
@@ -724,7 +762,7 @@ end
 
 local function UpdateParry(now)
     if now >= parry.NextRefresh then
-        parry.NextRefresh = now + .5
+        parry.NextRefresh = NextSlot(now, .12)
         RefreshParry()
     end
     if not parry.Killer or parry.Team ~= "Survivors" then
@@ -848,6 +886,7 @@ do
             list[#list + 1] = {Animator = animator, Root = root, IsLocal = true, State = states[animator] or {}}
         end
         for _, player in Players:GetPlayers() do
+            task.wait()
             if player ~= localPlayer then
                 local team = TeamName(player)
                 if team and team ~= "Spectator" then
@@ -1064,8 +1103,9 @@ do
 
     UpdateDaggerAim = function(now)
         if now >= nextRefresh then
-            nextRefresh = now + .5
+            nextRefresh = NextSlot(now, .25)
             Refresh()
+            now = tick()
         end
         if #throwers == 0 then return false end
         for _, target in targets do
@@ -1145,9 +1185,47 @@ do
     local readsPerTick = 300
     local classifyWindow = 3
 
+    local rotationOffset = tonumber(O.Primitive and O.Primitive.Rotation)
+    local limbs = {"Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"}
+
+    local function PartAxes(partAddress)
+        if not partAddress or not rotationOffset then return nil end
+        local primitive = memory_read("uintptr_t", partAddress + primitiveOffset)
+        if not Valid(primitive) then return nil end
+        local base, rotation = primitive + primitivePositionOffset, primitive + rotationOffset
+        local x, y, z = memory_read("float", base), memory_read("float", base + 4), memory_read("float", base + 8)
+        if not x or x ~= x or math.abs(x) > 1e6 or math.abs(y) > 1e6 or math.abs(z) > 1e6 then return nil end
+        local up = Vector3.new(memory_read("float", rotation + 4), memory_read("float", rotation + 16), memory_read("float", rotation + 28))
+        local right = Vector3.new(memory_read("float", rotation), memory_read("float", rotation + 12), memory_read("float", rotation + 24))
+        if math.abs(up.Magnitude - 1) > .05 or math.abs(right.Magnitude - 1) > .05 then return nil end
+        return Vector3.new(x, y, z), up, right
+    end
+
     UpdateZombiePositions = function()
         for _, zombie in zombies do
-            zombie.Position = MemoryPosition(zombie.Root)
+            local parts = zombie.Parts
+            local head = PartAxes(parts.Head)
+            local torso, torsoUp, torsoRight = PartAxes(parts.Torso)
+            local bones
+            if head and torso then
+                local neck, pelvis = torso + torsoUp, torso - torsoUp
+                bones = {{head, neck}, {neck, pelvis}}
+                for _, side in {"Left", "Right"} do
+                    local arm, armUp = PartAxes(parts[side .. " Arm"])
+                    if arm then
+                        local shoulder = arm + armUp
+                        bones[#bones + 1] = {neck, shoulder}
+                        bones[#bones + 1] = {shoulder, arm - armUp}
+                    end
+                    local leg, legUp = PartAxes(parts[side .. " Leg"])
+                    if leg then
+                        local hip = leg + legUp
+                        bones[#bones + 1] = {pelvis, hip}
+                        bones[#bones + 1] = {hip, leg - legUp}
+                    end
+                end
+            end
+            zombie.Bones, zombie.Head = bones, head
         end
     end
 
@@ -1196,7 +1274,9 @@ do
                             local names = MemoryChildNames(child)
                             Budget(10)
                             if names.Humanoid and names.HumanoidRootPart and names.RagdollConstraints then
-                                zombies[child] = {Root = names.HumanoidRootPart}
+                                local parts = {}
+                                for _, limb in limbs do parts[limb] = names[limb] end
+                                zombies[child] = {Parts = parts}
                                 known[child] = "Zombie"
                             elseif now - firstSeen[child] > classifyWindow then
                                 known[child] = false
@@ -1223,18 +1303,16 @@ do
             if x then DrawText(x, y, "Bear Trap", trapColor) end
         end
         for _, zombie in zombies do
-            local position = zombie.Position
-            if position then
-                local x, top = Project(position.X, position.Y + 3, position.Z)
-                local _, bottom = Project(position.X, position.Y - 3, position.Z)
-                if x and bottom then
-                    local halfWidth = (bottom - top) * .3
-                    DrawLine(x - halfWidth, top, x + halfWidth, top, zombieColor)
-                    DrawLine(x + halfWidth, top, x + halfWidth, bottom, zombieColor)
-                    DrawLine(x + halfWidth, bottom, x - halfWidth, bottom, zombieColor)
-                    DrawLine(x - halfWidth, bottom, x - halfWidth, top, zombieColor)
-                    DrawText(x, top - 8, "Zombie", zombieColor)
-                end
+            for _, bone in zombie.Bones or {} do
+                local a, b = bone[1], bone[2]
+                local ax, ay = Project(a.X, a.Y, a.Z)
+                local bx, by = Project(b.X, b.Y, b.Z)
+                if ax and bx then DrawLine(ax, ay, bx, by, zombieColor) end
+            end
+            local head = zombie.Head
+            if head then
+                local x, y = Project(head.X, head.Y + 1.5, head.Z)
+                if x then DrawText(x, y, "Zombie", zombieColor) end
             end
         end
     end
@@ -1254,6 +1332,7 @@ do
     local waves, names = {}, {}
     local crouching = false
     local lastThreat = -math.huge
+    local nextScan = 0
 
     ReleaseCrouch = function()
         if crouching then keyrelease(crouchKey) end
@@ -1266,8 +1345,9 @@ do
             ReleaseCrouch()
             return
         end
-        local children = MemoryChildren(workspace.Address)
+        local children = now >= nextScan and MemoryChildren(workspace.Address)
         if children then
+            nextScan = now + .1
             local seen = {}
             for _, address in children do
                 seen[address] = true
@@ -1410,7 +1490,7 @@ do
         {Attribute = "speedboost", Name = "Speed multiplier", Kind = "Number", Prefix = "x", Decimals = 2, NormalValue = 1, ChangedColor = style.Working},
     }
 
-    local hud = {X = 40, Y = 200, Width = 230, Lines = {}, NextGenerators = 0, NextKiller = 0, WasDown = false}
+    local hud = {X = 40, Y = 200, Width = 230, Lines = {}, NextGenerators = 0, NextKiller = 0, NextRead = 0, Values = {}, Shown = {}, ReadIndex = 0, WasDown = false}
     if isfile(style.File) then
         local x, y, w = string.match(readfile(style.File), "(%-?%d+) (%-?%d+) (%d+)")
         if x then hud.X, hud.Y, hud.Width = tonumber(x), tonumber(y), math.max(tonumber(w), style.MinWidth) end
@@ -1418,6 +1498,7 @@ do
 
     local function Create(kind, properties)
         local object = Drawing.new(kind)
+        if kind == "Text" and textFont then object.Font = textFont end
         for key, value in properties do object[key] = value end
         object.Visible = false
         allDrawings[#allDrawings + 1] = object
@@ -1496,20 +1577,31 @@ do
         end
         if #addresses == 0 then lines[#lines + 1] = {Text = "none found", Color = style.TextColor} end
         lines[#lines + 1] = {Gap = true}
-        local killer = world.KillerCharacter
         lines[#lines + 1] = {Text = if world.KillerType ~= "" then "Killer: " .. world.KillerType else "Killer", Color = style.Heading}
-        if not killer then
+        if not world.KillerCharacter then
             lines[#lines + 1] = {Text = "no killer found", Color = style.TextColor}
         else
-            local shownList = {}
-            for _, shown in style.KillerAttributes[world.KillerType] or {} do shownList[#shownList + 1] = shown end
-            for _, shown in style.CommonAttributes do shownList[#shownList + 1] = shown end
-            for _, shown in shownList do
-                local text, color = FormatValue(shown, killer:GetAttribute(shown.Attribute))
+            for _, shown in hud.Shown do
+                local text, color = FormatValue(shown, hud.Values[shown.Attribute])
                 lines[#lines + 1] = {Text = shown.Name .. ": " .. text, Color = color}
             end
         end
         hud.Lines = lines
+    end
+
+    local function ReadNextAttribute()
+        local killer = world.KillerCharacter
+        if killer ~= hud.Killer or world.KillerType ~= hud.KillerType then
+            hud.Killer, hud.KillerType, hud.Values, hud.ReadIndex = killer, world.KillerType, {}, 0
+            local shownList = {}
+            for _, shown in style.KillerAttributes[world.KillerType] or {} do shownList[#shownList + 1] = shown end
+            for _, shown in style.CommonAttributes do shownList[#shownList + 1] = shown end
+            hud.Shown = shownList
+        end
+        if not killer or #hud.Shown == 0 then return end
+        hud.ReadIndex = hud.ReadIndex % #hud.Shown + 1
+        local attribute = hud.Shown[hud.ReadIndex].Attribute
+        hud.Values[attribute] = killer:GetAttribute(attribute)
     end
 
     local function HandleMouse()
@@ -1541,8 +1633,12 @@ do
 
     UpdateInfoHud = function(now)
         HandleMouse()
+        if now >= hud.NextRead then
+            hud.NextRead = now + .06
+            ReadNextAttribute()
+        end
         if now >= hud.NextKiller then
-            hud.NextKiller = now + .5
+            hud.NextKiller = NextSlot(now, .37)
             RefreshLines()
         end
     end
@@ -1609,7 +1705,7 @@ local function Render()
     local started = os.clock()
     usedLines, usedTexts, usedTriangles = 0, 0, 0
     UpdateCamera(tick())
-    if frame.Ready then
+    if frame.Ready and not vault.Scanning then
         if bPalletESP then
             for _, entry in trackers.Pallets.Entries do
                 if not entry.Hidden then Highlight(entry.Pose, palletColor) end
@@ -1629,7 +1725,7 @@ local function Render()
         if bShowParryRange then RenderParry() end
         if bDaggerTrajectory then RenderDaggerTrajectory() end
     end
-    RenderInfoHud(bInfoHud)
+    RenderInfoHud(bInfoHud and not vault.Scanning)
     if usedLines > wantedLines then wantedLines = usedLines end
     if usedTexts > wantedTexts then wantedTexts = usedTexts end
     if usedTriangles > wantedTriangles then wantedTriangles = usedTriangles end
@@ -1679,8 +1775,9 @@ task.spawn(function()
             GrowTexts()
             GrowTriangles()
             if now >= world.NextRefresh then
-                world.NextRefresh = now + .5
+                world.NextRefresh = NextSlot(now, 0)
                 RefreshWorld(now)
+                now = tick()
             end
             if now >= nextMapCheck then
                 nextMapCheck = now + 2
@@ -1776,7 +1873,7 @@ task.spawn(function()
                 end
             end
             stats.Skill += 1
-            task.wait(if pressed or lastNeedle == 0 then .05 else 0)
+            task.wait(if pressed or lastNeedle == 0 then .05 else 1 / 60)
         end
     end
 end)
@@ -1811,6 +1908,192 @@ task.spawn(function()
     end
 end)
 
+do
+    local keys = {"DISTANCE", "REPEAT_DISTANCE", "DOT", "MIN_SPEED", "ARRIVE_GRACE", "SIDESTEP_TIME"}
+    local gameDefaults = {DISTANCE = 3.5, REPEAT_DISTANCE = 4, DOT = .7071067811865476, MIN_SPEED = 12.5, ARRIVE_GRACE = .12, SIDESTEP_TIME = .25}
+    local maxPreset = {DISTANCE = .1, REPEAT_DISTANCE = .1, DOT = -1, MIN_SPEED = 0, ARRIVE_GRACE = 1, SIDESTEP_TIME = 5}
+    local sprintKey = 0x10
+    local checkInterval = .5
+    local tolerance = .006
+    local clusterSpan = 0x400
+    local scanDelay = .5
+    local minimumShown = 2
+
+    local function Matches(value, target)
+        value = tonumber(value)
+        return value ~= nil and target ~= nil and math.abs(value - target) < tolerance
+    end
+
+    local function Desired()
+        return maxPreset
+    end
+
+    local function Cluster(numeric)
+        table.sort(numeric, function(a, b) return a.Addr < b.Addr end)
+        for first = 1, #numeric do
+            local picked, count = {}, 0
+            for index = first, #numeric do
+                local entry = numeric[index]
+                if entry.Addr - numeric[first].Addr > clusterSpan then break end
+                if not picked[entry.Entry.key] then
+                    picked[entry.Entry.key] = entry.Entry
+                    count += 1
+                end
+            end
+            if count == #keys then
+                local entries = {}
+                for _, key in keys do entries[#entries + 1] = picked[key] end
+                return entries, "grouped"
+            end
+        end
+        return nil
+    end
+
+    local function Scan(desired)
+        print("[MatchaVD] fast vault: scanning the game's memory, this takes a few seconds")
+        local ok, result = pcall(getgc, keys)
+        if not ok or type(result) ~= "table" then
+            print("[MatchaVD] fast vault: getgc failed: " .. tostring(result))
+            return nil
+        end
+        local numeric = {}
+        for _, entry in result do
+            local addr = tonumber(entry.addr)
+            if entry.type == "number" and addr then numeric[#numeric + 1] = {Entry = entry, Addr = addr} end
+        end
+        local entries, how = Cluster(numeric)
+        if not entries then
+            local applied = _G.MatchaVDVaultApplied or {}
+            entries, how = {}, "by value"
+            for _, item in numeric do
+                local entry = item.Entry
+                local key = entry.key
+                if Matches(entry.value, gameDefaults[key]) or Matches(entry.value, desired[key]) or Matches(entry.value, applied[key]) then
+                    entries[#entries + 1] = entry
+                end
+            end
+        end
+        local found = {}
+        for _, entry in entries do found[entry.key] = (found[entry.key] or 0) + 1 end
+        local summary = {}
+        for _, key in keys do summary[#summary + 1] = key .. " x" .. (found[key] or 0) end
+        print(string.format("[MatchaVD] fast vault (%s, %d of %d entries): %s", how, #entries, #result, table.concat(summary, ", ")))
+        return if #entries > 0 then entries else nil
+    end
+
+    local function Apply(entries, values)
+        local ok, err = pcall(applygc, entries, values)
+        if not ok then
+            print("[MatchaVD] fast vault: applygc failed: " .. tostring(err))
+            return false
+        end
+        _G.MatchaVDVaultApplied = values
+        return true
+    end
+
+    local function SameValues(a, b)
+        if not a or not b then return false end
+        for _, key in keys do
+            if not Matches(a[key], b[key]) then return false end
+        end
+        return true
+    end
+
+    local session = _G.MatchaVDVaultScan
+    if not session or session.JobId ~= game.JobId then
+        session = {JobId = game.JobId}
+        _G.MatchaVDVaultScan = session
+    end
+    local entries = session.Entries
+
+    local popup = Drawing.new("Text")
+    if textFont then popup.Font = textFont end
+    popup.Size = 20
+    popup.Center = true
+    popup.Outline = true
+    popup.Color = Color3.fromRGB(255, 255, 255)
+    popup.Text = "Scanning memory for always fast vault\nESP is turned off for a few seconds."
+    popup.Visible = false
+    allDrawings[#allDrawings + 1] = popup
+
+    local function ScanWithPopup()
+        vault.Scanning = true
+        local camera = workspace.CurrentCamera
+        local size = camera and camera.ViewportSize
+        if size then popup.Position = Vector2.new(math.floor(size.X / 2), math.floor(size.Y / 2 - 40)) end
+        popup.Visible = true
+        wait(.2)
+        entries = Scan(Desired())
+        session.Entries = entries
+        popup.Visible = false
+        vault.Scanning = false
+    end
+
+    local watch = {NextFind = 0}
+    local transparencyOffset = visibleOffset - 0x49
+
+    local function LoadingScreenShown(now)
+        if not watch.Frame and now >= watch.NextFind then
+            watch.NextFind = now + 2
+            local gui = Players.LocalPlayer:FindFirstChild("PlayerGui")
+            local darkness = gui and gui:FindFirstChild("Darkness")
+            local frame = darkness and darkness:FindFirstChild("Frame")
+            watch.Frame = frame and frame.Address
+        end
+        if not watch.Frame then return false end
+        local transparency = memory_read("float", watch.Frame + transparencyOffset)
+        if not transparency or transparency ~= transparency or transparency < -.01 or transparency > 1.01 then
+            watch.Frame = nil
+            return false
+        end
+        return transparency < .5
+    end
+
+    vault.ScanNow = function()
+        if not entries and not vault.Scanning then watch.Requested = true end
+    end
+
+    task.spawn(function()
+        local sprinting = false
+        local shownSince, scanAt
+        local hiddenReads = 0
+
+        local function SetSprint(on)
+            if on ~= sprinting then
+                sprinting = on
+                if on then keypress(sprintKey) else keyrelease(sprintKey) end
+            end
+        end
+
+        while Running() do
+            local now = tick()
+            if not entries then
+                if LoadingScreenShown(now) then
+                    shownSince, hiddenReads = shownSince or now, 0
+                elseif shownSince then
+                    hiddenReads += 1
+                    if hiddenReads >= 2 then
+                        print(string.format("[MatchaVD] fast vault: loading screen hidden after %.1f s%s", now - shownSince, if now - shownSince >= minimumShown then ", scanning" else ", too short, ignored"))
+                        if now - shownSince >= minimumShown then scanAt = now + scanDelay end
+                        shownSince, hiddenReads = nil, 0
+                    end
+                end
+                if watch.Requested or (scanAt and now >= scanAt) then
+                    watch.Requested, scanAt = false, nil
+                    ScanWithPopup()
+                end
+            end
+            if entries then
+                local wanted = if vault.Enabled then Desired() else gameDefaults
+                if not SameValues(session.Written, wanted) and Apply(entries, wanted) then session.Written = table.clone(wanted) end
+            end
+            SetSprint(vault.Enabled and vault.Sprint and isrbxactive())
+            wait(if entries then checkInterval else .1)
+        end
+        SetSprint(false)
+    end)
+end
+
 if type(UI) == "table" and type(UI.AddTab) == "function" then
     local tabName = "Violence District"
     local defaults = {
@@ -1830,6 +2113,8 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_parry_range = bShowParryRange,
         vd_auto_pallet = bAutoPallet,
         vd_crouch = bAutoCrouch,
+        vd_vault = vault.Enabled,
+        vd_vault_sprint = vault.Sprint,
     }
     local apply = {
         vd_gen = function(v) bGeneratorESP = v == true end,
@@ -1848,6 +2133,8 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_parry_range = function(v) bShowParryRange = v == true end,
         vd_auto_pallet = function(v) bAutoPallet = v == true end,
         vd_crouch = function(v) bAutoCrouch = v == true end,
+        vd_vault = function(v) vault.Enabled = v == true end,
+        vd_vault_sprint = function(v) vault.Sprint = v == true end,
     }
     local colours = {
         vd_gen_col = function(c) generatorColor = c end,
@@ -1931,7 +2218,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         Picker(esp, "vd_win_col", windowColor)
         Toggle(esp, "vd_trap", "Bear trap ESP")
         Picker(esp, "vd_trap_col", trapColor)
-        Toggle(esp, "vd_zombie", "Cure zombie ESP")
+        Toggle(esp, "vd_zombie", "Cure zombie skeleton ESP")
         Picker(esp, "vd_zombie_col", zombieColor)
         Toggle(esp, "vd_dagger", "Veil dagger trajectory")
         Picker2(esp, "vd_dagger_start", daggerColor, "vd_dagger_end", daggerEndColor)
@@ -1942,13 +2229,18 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         Toggle(highlighting, "vd_hl_fill", "Highlight fill")
         Toggle(highlighting, "vd_hl_outline", "Highlight outline")
 
-        local auto = Section(tab, "Automation", "Right")
-        Toggle(auto, "vd_skill", "Auto skill check")
-        Toggle(auto, "vd_parry", "Auto parry")
-        Toggle(auto, "vd_parry_range", "Show parry range")
-        Picker(auto, "vd_parry_col", parryRangeColor)
-        Toggle(auto, "vd_auto_pallet", "Auto pallet")
-        Toggle(auto, "vd_crouch", "Crouch under Abysswalker waves")
+        local main = Section(tab, "Main", "Right")
+        Toggle(main, "vd_skill", "Auto skill check")
+        Toggle(main, "vd_parry", "React parry")
+        Toggle(main, "vd_parry_range", "Show parry range")
+        Picker(main, "vd_parry_col", parryRangeColor)
+        Toggle(main, "vd_auto_pallet", "Auto drop pallet on killer")
+        Toggle(main, "vd_crouch", "Auto crouch (against Abysswalker)")
+        Toggle(main, "vd_vault", "Always fast vault")
+        Toggle(main, "vd_vault_sprint", "Hold sprint")
+        Widget(main, "Button", "vd_vault_scan", "Scan for fast vault now", function()
+            if vault.ScanNow then vault.ScanNow() end
+        end)
     end)
 
     task.spawn(function()
