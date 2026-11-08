@@ -124,6 +124,84 @@ local function NextSlot(now, phase)
     return (math.floor((now - phase) / .5) + 1) * .5 + phase
 end
 
+local scheduler = {Jobs = {}, Budget = .002, Tick = 1 / 60, Rotation = 0}
+
+local function Sleep(seconds)
+    local job = scheduler.Current
+    if job and coroutine.running() == job.Thread then
+        job.WakeAt = tick() + (seconds or 0)
+        coroutine.yield()
+    else
+        task.wait(seconds)
+    end
+end
+
+local function Yield()
+    Sleep(0)
+end
+
+local function AddJob(name, critical, fn)
+    local job = {Name = name, Critical = critical, Fn = fn, WakeAt = 0}
+    job.Thread = coroutine.create(fn)
+    table.insert(scheduler.Jobs, if critical then 1 else #scheduler.Jobs + 1, job)
+end
+
+local function ResumeJob(job, now)
+    scheduler.Current = job
+    job.WakeAt = math.huge
+    local ok, err = coroutine.resume(job.Thread)
+    scheduler.Current = nil
+    if not ok then
+        print("[MatchaVD] " .. job.Name .. " failed, restarting in 1 s: " .. tostring(err))
+        job.Thread, job.WakeAt = coroutine.create(job.Fn), now + 1
+    elseif coroutine.status(job.Thread) == "dead" then
+        job.Done = true
+    end
+end
+
+task.spawn(function()
+    while Running() do
+        local started = os.clock()
+        local now = tick() + scheduler.Tick / 2
+        local jobs = scheduler.Jobs
+        local count = #jobs
+        scheduler.Rotation += 1
+        for _, job in jobs do
+            if job.Critical and not job.Done and now >= job.WakeAt then ResumeJob(job, now) end
+        end
+        for i = 1, count do
+            local job = jobs[(i + scheduler.Rotation) % count + 1]
+            if not job.Critical and not job.Done and now >= job.WakeAt then
+                if os.clock() - started > scheduler.Budget then break end
+                ResumeJob(job, now)
+            end
+        end
+        task.wait(scheduler.Tick)
+    end
+end)
+
+local blockReads = false
+do
+    local ok, result = pcall(memory_read, "buffer", workspace.Address, 16)
+    if ok and type(result) == "string" then result = buffer.fromstring(result) end
+    if ok and type(result) == "buffer" and buffer.len(result) >= 16 then
+        local low, high = buffer.readu32(result, 0), buffer.readu32(result, 4)
+        blockReads = low + high * 4294967296 == memory_read("uintptr_t", workspace.Address)
+    end
+    print("[MatchaVD] block memory reads " .. (if blockReads then "on" else "off (falling back to single reads)"))
+end
+
+local function ReadBlock(address, size)
+    if not blockReads then return nil end
+    local result = memory_read("buffer", address, size)
+    if type(result) == "string" then result = buffer.fromstring(result) end
+    return if type(result) == "buffer" and buffer.len(result) >= size then result else nil
+end
+
+local function BlockU64(block, offset)
+    return buffer.readu32(block, offset) + buffer.readu32(block, offset + 4) * 4294967296
+end
+
 local parry = {History = {}, LastParry = 0, NextRefresh = 0, AnimationIds = {}}
 local world = {NextRefresh = 0, NextKillerType = 0, KillerType = ""}
 
@@ -141,6 +219,14 @@ local function MemoryChildren(address)
     local last = memory_read("uintptr_t", list + childrenEndOffset)
     if not Valid(first) or not last or last < first or last - first > 0x10 * 10000 then return nil end
     local result = {}
+    local block = last > first and ReadBlock(first, last - first)
+    if block then
+        for offset = 0, last - first - 0x10, 0x10 do
+            local child = BlockU64(block, offset)
+            if Valid(child) then result[#result + 1] = child end
+        end
+        return result
+    end
     for entry = first, last - 0x10, 0x10 do
         local child = memory_read("uintptr_t", entry)
         if Valid(child) then result[#result + 1] = child end
@@ -189,9 +275,112 @@ local function MemoryPosition(partAddress)
     local primitive = memory_read("uintptr_t", partAddress + primitiveOffset)
     if not Valid(primitive) then return nil end
     local base = primitive + primitivePositionOffset
-    local x, y, z = memory_read("float", base), memory_read("float", base + 4), memory_read("float", base + 8)
+    local x, y, z
+    local block = ReadBlock(base, 12)
+    if block then
+        x, y, z = buffer.readf32(block, 0), buffer.readf32(block, 4), buffer.readf32(block, 8)
+    else
+        x, y, z = memory_read("float", base), memory_read("float", base + 4), memory_read("float", base + 8)
+    end
     if not x or not y or not z or x ~= x or y ~= y or z ~= z or math.abs(x) > 1e6 or math.abs(y) > 1e6 or math.abs(z) > 1e6 then return nil end
     return Vector3.new(x, y, z)
+end
+
+local function NewAttributeReader(anchor)
+    return {Anchor = anchor, NextTry = 0, Backoff = 2}
+end
+
+local ReadAttribute
+
+do
+    local valueOffset, stride, rootOffset = 0x18, 0x58, 0x38
+
+    local function AttributeName(pointer)
+        if not Valid(pointer) then return "" end
+        local name = ReadStdString(pointer)
+        if name == "" then name = ReadStdString(pointer + 8) end
+        return name
+    end
+
+    local function EntryMap(first, packed)
+        if not Valid(first) or not packed then return nil end
+        local count, capacity = packed % 4294967296, math.floor(packed / 4294967296)
+        if count <= 0 or count > capacity or capacity > 256 then return nil end
+        local map, valid = {}, false
+        for i = 0, count - 1 do
+            local entry = first + i * stride
+            local name = AttributeName(memory_read("uintptr_t", entry))
+            if name ~= "" then
+                valid = true
+                map[name] = entry
+            end
+        end
+        return if valid then map else nil
+    end
+
+    local function NodeEntries(node)
+        local a, b, c = memory_read("uintptr_t", node + 8), memory_read("uintptr_t", node + 0x10), memory_read("uintptr_t", node + 0x18)
+        return EntryMap(a, b) or EntryMap(c, a), string.format("%s %s %s", tostring(a), tostring(b), tostring(c))
+    end
+
+    local function FindNode(address, anchor)
+        local root = memory_read("uintptr_t", address + rootOffset)
+        if not Valid(root) then return nil end
+        local queue, visited, index = {root}, {}, 1
+        while index <= #queue and index <= 64 do
+            local node = queue[index]
+            index += 1
+            if not visited[node] then
+                visited[node] = true
+                local entries = NodeEntries(node)
+                if entries and entries[anchor] then return node end
+                for _, offset in {0, 0x10} do
+                    local pointer = memory_read("uintptr_t", node + offset)
+                    if Valid(pointer) and not visited[pointer] then queue[#queue + 1] = pointer end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function Value(entry, kind)
+        if kind == "Bool" then return memory_read("byte", entry + valueOffset) == 1 end
+        if kind == "Text" then return ReadStdString(entry + valueOffset) end
+        local number = memory_read("double", entry + valueOffset)
+        return if number == number then number else nil
+    end
+
+    ReadAttribute = function(reader, instance, name, kind, now)
+        local address = instance and instance.Address
+        if not address then return nil end
+        if reader.Address ~= address then
+            reader.Address, reader.Node, reader.Entries, reader.Layout, reader.NextTry, reader.Backoff = address, nil, nil, nil, 0, 2
+        end
+        if not reader.Node and now >= reader.NextTry then
+            reader.Node = FindNode(address, reader.Anchor)
+            if not reader.Node then
+                reader.NextTry = now + reader.Backoff
+                reader.Backoff = math.min(reader.Backoff * 2, 30)
+            end
+        end
+        local node = reader.Node
+        if node then
+            local layout = string.format("%s %s %s", tostring(memory_read("uintptr_t", node + 8)), tostring(memory_read("uintptr_t", node + 0x10)), tostring(memory_read("uintptr_t", node + 0x18)))
+            if layout ~= reader.Layout then
+                local entries = NodeEntries(node)
+                if entries and entries[reader.Anchor] then
+                    reader.Entries, reader.Layout = entries, layout
+                else
+                    reader.Node, reader.Entries, reader.Layout, reader.NextTry = nil, nil, nil, now + reader.Backoff
+                end
+            end
+            if reader.Entries then
+                local entry = reader.Entries[name]
+                return if entry then Value(entry, kind) else nil
+            end
+        end
+        return instance:GetAttribute(name)
+    end
 end
 
 local function Finish(pose)
@@ -247,7 +436,7 @@ local function FindFolder(map, tracker)
     local resources = map:FindFirstChild("resources")
     for _, parent in {map, resources} do
         for _, name in tracker.Names do
-            task.wait()
+            Yield()
             if not Running() then return end
             local found = parent:FindFirstChild(name)
             if found and found:FindFirstChild(tracker.Child) then
@@ -262,7 +451,7 @@ local function ReadEntries(tracker)
     local complete = true
     local found = {}
     for index, child in tracker.Folder:GetChildren() do
-        if index % 16 == 0 then task.wait() end
+        if index % 16 == 0 then Yield() end
         local address = child.Address
         local entry = tracker.Entries[address] or tracker.Read(child)
         if entry then
@@ -306,9 +495,11 @@ local function UpdateGenerators(now)
     for _, entry in trackers.Generators.Entries do
         if not entry.Completed and now >= entry.NextPoll then
             entry.NextPoll = now + progressPollInterval
-            local progress = tonumber(entry.Model:GetAttribute("RepairProgress"))
+            entry.Reader = entry.Reader or NewAttributeReader("RepairProgress")
+            local progress = tonumber(ReadAttribute(entry.Reader, entry.Model, "RepairProgress", "Number", now))
             if progress then
-                if progress < 100 and tostring(entry.Model:GetAttribute("Regressing")) == "true" then
+                local regressing = ReadAttribute(entry.Reader, entry.Model, "Regressing", "Bool", now)
+                if progress < 100 and (regressing == true or regressing == "true") then
                     entry.FallingUntil = now + progressStateTime
                 end
                 local last = entry.Progress
@@ -380,7 +571,7 @@ local function ScanWindows(map)
     local found = table.clone(windows)
     for index, object in descendants do
         if index % 500 == 0 then
-            task.wait()
+            Yield()
             if not Running() then return end
         end
         if object.Name == "Window" then
@@ -656,10 +847,11 @@ local function RefreshParry()
     parry.Team = TeamName(player)
     local character = player.Character
     parry.LocalRoot = character and character:FindFirstChild("HumanoidRootPart")
-    parry.HasDagger = parry.LocalRoot ~= nil and (character:FindFirstChild("Parrying Dagger") ~= nil or player:GetAttribute("EquippedItem") == "Parrying Dagger")
+    parry.ItemReader = parry.ItemReader or NewAttributeReader("EquippedItem")
+    parry.HasDagger = parry.LocalRoot ~= nil and (character:FindFirstChild("Parrying Dagger") ~= nil or ReadAttribute(parry.ItemReader, player, "EquippedItem", "Text", tick()) == "Parrying Dagger")
     local killer
     for _, other in Players:GetPlayers() do
-        task.wait()
+        Yield()
         if other ~= player and TeamName(other) == "Killer" then
             local killerCharacter = other.Character
             local humanoid = killerCharacter and killerCharacter:FindFirstChild("Humanoid")
@@ -770,6 +962,10 @@ local function UpdateParry(now)
         return false
     end
     parry.KillerPosition = parry.Killer.Root.Position
+    if not parry.KillerPosition then
+        parry.Killer, parry.Attack, parry.NextRefresh = nil, nil, 0
+        return false
+    end
     parry.LocalPosition = parry.LocalRoot and parry.LocalRoot.Position
     local history = parry.History
     if parry.LocalPosition then
@@ -795,7 +991,7 @@ end
 local function RenderParry()
     local killer = parry.Killer
     if not killer or parry.Team ~= "Survivors" or not parry.KillerPosition then return end
-    local position = killer.Root.Position
+    local position = killer.Root.Position or parry.KillerPosition
     local attack = parry.Attack
     local config = attack and attack.Config or attackDefaults
     local radius = (config.Length or attackDefaults.Length) + localRadius
@@ -886,7 +1082,7 @@ do
             list[#list + 1] = {Animator = animator, Root = root, IsLocal = true, State = states[animator] or {}}
         end
         for _, player in Players:GetPlayers() do
-            task.wait()
+            Yield()
             if player ~= localPlayer then
                 local team = TeamName(player)
                 if team and team ~= "Spectator" then
@@ -1070,8 +1266,13 @@ do
     end
 
     local function EnemyArc(thrower)
-        local origin = thrower.Root.Position + Vector3.new(0, daggerHeight, 0)
-        local look = thrower.Root.CFrame.LookVector
+        local rootPosition, rootFrame = thrower.Root.Position, thrower.Root.CFrame
+        if not rootPosition or not rootFrame then
+            thrower.Origin = nil
+            return
+        end
+        local origin = rootPosition + Vector3.new(0, daggerHeight, 0)
+        local look = rootFrame.LookVector
         local flat = Vector3.new(look.X, 0, look.Z)
         if flat.Magnitude < .01 then
             thrower.Origin = nil
@@ -1101,7 +1302,8 @@ do
         thrower.EndY = bestEndY
     end
 
-    UpdateDaggerAim = function(now)
+    UpdateDaggerAim = function(now, reset)
+        if reset then throwers, targets, motions, nextRefresh = {}, {}, {}, 0 end
         if now >= nextRefresh then
             nextRefresh = NextSlot(now, .25)
             Refresh()
@@ -1111,10 +1313,14 @@ do
         for _, target in targets do
             local position = target.Root.Position
             local head, left, right = target.Head.Position, target.LeftLeg.Position, target.RightLeg.Position
-            target.Position, target.HeadPosition = position, head
-            target.FeetPosition = (left + right) / 2
-            target.Bottom = math.min(left.Y, right.Y) - legHalfHeight
-            UpdateMotion(target.Motion, position, now)
+            if position and head and left and right then
+                target.Position, target.HeadPosition = position, head
+                target.FeetPosition = (left + right) / 2
+                target.Bottom = math.min(left.Y, right.Y) - legHalfHeight
+                UpdateMotion(target.Motion, position, now)
+            else
+                target.Position, target.HeadPosition = nil, nil
+            end
         end
         local leftHeld = ismouse1pressed()
         for _, thrower in throwers do
@@ -1174,7 +1380,8 @@ local function RefreshWorld(now)
         world.KillerType = ""
     elseif now >= world.NextKillerType then
         world.NextKillerType = now + 2
-        world.KillerType = tostring(killerCharacter:GetAttribute("MorphedKiller") or "")
+        world.KillerReader = world.KillerReader or NewAttributeReader("HookCount")
+        world.KillerType = tostring(ReadAttribute(world.KillerReader, killerCharacter, "MorphedKiller", "Text", now) or "")
     end
 end
 
@@ -1192,11 +1399,17 @@ do
         if not partAddress or not rotationOffset then return nil end
         local primitive = memory_read("uintptr_t", partAddress + primitiveOffset)
         if not Valid(primitive) then return nil end
-        local base, rotation = primitive + primitivePositionOffset, primitive + rotationOffset
-        local x, y, z = memory_read("float", base), memory_read("float", base + 4), memory_read("float", base + 8)
+        local start = math.min(rotationOffset, primitivePositionOffset)
+        local block = ReadBlock(primitive + start, math.max(rotationOffset + 36, primitivePositionOffset + 12) - start)
+        local function Float(offset)
+            if block then return buffer.readf32(block, offset - start) end
+            return memory_read("float", primitive + offset)
+        end
+        local base, rotation = primitivePositionOffset, rotationOffset
+        local x, y, z = Float(base), Float(base + 4), Float(base + 8)
         if not x or x ~= x or math.abs(x) > 1e6 or math.abs(y) > 1e6 or math.abs(z) > 1e6 then return nil end
-        local up = Vector3.new(memory_read("float", rotation + 4), memory_read("float", rotation + 16), memory_read("float", rotation + 28))
-        local right = Vector3.new(memory_read("float", rotation), memory_read("float", rotation + 12), memory_read("float", rotation + 24))
+        local up = Vector3.new(Float(rotation + 4), Float(rotation + 16), Float(rotation + 28))
+        local right = Vector3.new(Float(rotation), Float(rotation + 12), Float(rotation + 24))
         if math.abs(up.Magnitude - 1) > .05 or math.abs(right.Magnitude - 1) > .05 then return nil end
         return Vector3.new(x, y, z), up, right
     end
@@ -1229,7 +1442,7 @@ do
         end
     end
 
-    task.spawn(function()
+    AddJob("Map entities", false, function()
         local known, firstSeen = {}, {}
         local mapAddress
         local reads = 0
@@ -1237,7 +1450,7 @@ do
             reads += count
             if reads >= readsPerTick then
                 reads = 0
-                task.wait()
+                Yield()
             end
         end
         while Running() do
@@ -1246,7 +1459,8 @@ do
             if not wantTraps then traps = {} end
             if not wantZombies then zombies = {} end
             if not memoryReady or not (wantTraps or wantZombies) or not isrbxactive() or not world.MapAddress then
-                wait(.5)
+                mapAddress = nil
+                Sleep(.5)
             else
                 if world.MapAddress ~= mapAddress then
                     mapAddress, known, firstSeen, traps, zombies = world.MapAddress, {}, {}, {}, {}
@@ -1291,7 +1505,7 @@ do
                         known[child], firstSeen[child], traps[child], zombies[child] = nil, nil, nil, nil
                     end
                 end
-                wait(1)
+                Sleep(1)
             end
         end
     end)
@@ -1365,6 +1579,10 @@ do
         end
 
         local me = root.Position
+        if not me then
+            ReleaseCrouch()
+            return
+        end
         for _, wave in waves do
             local position = MemoryPosition(wave.Part)
             if position then
@@ -1600,8 +1818,9 @@ do
         end
         if not killer or #hud.Shown == 0 then return end
         hud.ReadIndex = hud.ReadIndex % #hud.Shown + 1
-        local attribute = hud.Shown[hud.ReadIndex].Attribute
-        hud.Values[attribute] = killer:GetAttribute(attribute)
+        local shown = hud.Shown[hud.ReadIndex]
+        world.KillerReader = world.KillerReader or NewAttributeReader("HookCount")
+        hud.Values[shown.Attribute] = ReadAttribute(world.KillerReader, killer, shown.Attribute, shown.Kind or "Number", tick())
     end
 
     local function HandleMouse()
@@ -1757,7 +1976,7 @@ local function Render()
     end
 end
 
-task.spawn(function()
+AddJob("Main", false, function()
     local map, mapAddress, generatorFolder
     local nextMapCheck, nextWindowScan = 0, 0
     local windowCount, stableScans = -1, 0
@@ -1765,12 +1984,21 @@ task.spawn(function()
         windows, nextWindowScan, windowCount, stableScans = {}, now + 2, -1, 0
     end
     for _, tracker in trackers do ResetTracker(tracker) end
+    local paused = false
     while Running() do
         if not isrbxactive() then
-            wait(.5)
+            paused = true
+            Sleep(.5)
         else
             local now = tick()
             local started = os.clock()
+            if paused then
+                paused = false
+                for _, tracker in trackers do ResetTracker(tracker) end
+                RestartWindows(now)
+                map, mapAddress, generatorFolder, nextMapCheck = nil, nil, nil, 0
+                world.NextRefresh, world.LocalRoot, world.KillerRoot, world.KillerCharacter = 0, nil, nil, nil
+            end
             GrowLines()
             GrowTexts()
             GrowTriangles()
@@ -1820,15 +2048,15 @@ task.spawn(function()
                 stats.LoopTime += os.clock() - started
                 PrintStats(tick())
             end
-            task.wait(loopInterval)
+            Sleep(loopInterval)
         end
     end
 end)
 
-task.spawn(function()
+AddJob("Skill check", true, function()
     local player = game:GetService("Players").LocalPlayer
     local guiRotationOffset = visibleOffset - 0x19
-    local check, line, goal
+    local check, line, goal, trapPerfect
     local nextFind = 0
     local pressed, lastNeedle, lastGoal, step = false, 0, 0, 0
 
@@ -1838,11 +2066,22 @@ task.spawn(function()
         check = gui and gui:FindFirstChild("Check")
         line = check and check:FindFirstChild("Line")
         goal = check and check:FindFirstChild("Goal")
+        trapPerfect = check and check:FindFirstChild("TrapPerfect")
+    end
+
+    local function ZoneStart()
+        local goalRotation = memory_read("float", goal.Address + guiRotationOffset)
+        if memory_read("byte", goal.Address + visibleOffset) == 1 or math.abs(goalRotation) >= 1 then return goalRotation end
+        if trapPerfect and memory_read("byte", trapPerfect.Address + visibleOffset) == 1 then
+            return memory_read("float", trapPerfect.Address + guiRotationOffset)
+        end
+        return nil
     end
 
     while Running() do
         if not bAutoSkillCheck or not isrbxactive() then
-            wait(.5)
+            check, line, goal, trapPerfect, nextFind = nil, nil, nil, nil, 0
+            Sleep(.5)
         else
             local now = tick()
             if not (check and line and goal) and now >= nextFind then
@@ -1852,15 +2091,14 @@ task.spawn(function()
             if check and line and goal then
                 if memory_read("byte", check.Address + visibleOffset) == 1 then
                     local needle = memory_read("float", line.Address + guiRotationOffset)
-                    local goalRotation = memory_read("float", goal.Address + guiRotationOffset)
-                    if needle < lastNeedle - 30 or math.abs(goalRotation - lastGoal) > 1 then
+                    local zone = ZoneStart()
+                    if needle < lastNeedle - 30 or (zone and math.abs(zone - lastGoal) > 1) then
                         pressed, step = false, 0
                     elseif needle > lastNeedle then
                         step = needle - lastNeedle
                     end
-                    lastNeedle, lastGoal = needle, goalRotation
-                    local target = goalRotation + skillCheckAngle
-                    if not pressed and step > 0 and needle + step / 2 >= target and needle <= goalRotation + 114 then
+                    lastNeedle, lastGoal = needle, zone or lastGoal
+                    if zone and not pressed and step > 0 and needle + step / 2 >= zone + skillCheckAngle and needle <= zone + 114 then
                         pressed = true
                         keypress(0x20)
                         task.spawn(function()
@@ -1873,37 +2111,40 @@ task.spawn(function()
                 end
             end
             stats.Skill += 1
-            task.wait(if pressed or lastNeedle == 0 then .05 else 1 / 60)
+            Sleep(if pressed or lastNeedle == 0 then .05 else 1 / 60)
         end
     end
 end)
 
-task.spawn(function()
+AddJob("Parry", true, function()
     if not activeAnimationsOffset or not trackAnimationOffset or not animationIdOffset then
         print("[MatchaVD] missing animation offsets, auto parry off")
         return
     end
     while Running() do
         if not (bAutoParry or bShowParryRange) or not isrbxactive() then
-            parry.Attack, parry.KillerPosition = nil, nil
-            wait(.5)
+            parry.Attack, parry.KillerPosition, parry.Killer, parry.LocalRoot, parry.NextRefresh = nil, nil, nil, nil, 0
+            table.clear(parry.History)
+            Sleep(.5)
         elseif UpdateParry(tick()) then
-            task.wait(1 / 60)
+            Sleep(1 / 60)
         else
-            wait(.25)
+            Sleep(.25)
         end
     end
 end)
 
-task.spawn(function()
+AddJob("Dagger aim", false, function()
     if not activeAnimationsOffset or not trackAnimationOffset or not animationIdOffset then return end
+    local paused = false
     while Running() do
         if not bDaggerTrajectory or not isrbxactive() then
-            wait(.5)
-        elseif UpdateDaggerAim(tick()) then
-            task.wait(1 / 60)
+            paused = true
+            Sleep(.5)
         else
-            wait(.25)
+            local active = UpdateDaggerAim(tick(), paused)
+            paused = false
+            if active then Sleep(1 / 60) else Sleep(.25) end
         end
     end
 end)
@@ -1916,7 +2157,7 @@ do
     local checkInterval = .5
     local tolerance = .006
     local clusterSpan = 0x400
-    local scanDelay = .5
+    local scanDelay = 2.5
     local minimumShown = 2
 
     local function Matches(value, target)
@@ -2022,7 +2263,7 @@ do
         local size = camera and camera.ViewportSize
         if size then popup.Position = Vector2.new(math.floor(size.X / 2), math.floor(size.Y / 2 - 40)) end
         popup.Visible = true
-        wait(.2)
+        Sleep(.2)
         entries = Scan(Desired())
         session.Entries = entries
         popup.Visible = false
@@ -2053,7 +2294,7 @@ do
         if not entries and not vault.Scanning then watch.Requested = true end
     end
 
-    task.spawn(function()
+    AddJob("Fast vault", false, function()
         local sprinting = false
         local shownSince, scanAt
         local hiddenReads = 0
@@ -2088,7 +2329,7 @@ do
                 if not SameValues(session.Written, wanted) and Apply(entries, wanted) then session.Written = table.clone(wanted) end
             end
             SetSprint(vault.Enabled and vault.Sprint and isrbxactive())
-            wait(if entries then checkInterval else .1)
+            Sleep(if entries then checkInterval else .1)
         end
         SetSprint(false)
     end)
@@ -2243,7 +2484,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         end)
     end)
 
-    task.spawn(function()
+    AddJob("Menu sync", false, function()
         local last = {}
         while Running() do
             for key, err in widgetErrors do
@@ -2271,7 +2512,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
                     end
                 end
             end
-            task.wait(.1)
+            Sleep(.1)
         end
     end)
 end
