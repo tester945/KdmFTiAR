@@ -44,7 +44,8 @@ local minimumWindows = 3
 local palletPollInterval = .125
 local loopInterval = 1 / 60
 local bDebugStats = false
-local vault = {Enabled = false, Sprint = false}
+local vault = {Enabled = false}
+local bMoonwalk = false
 
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
@@ -2153,12 +2154,10 @@ do
     local keys = {"DISTANCE", "REPEAT_DISTANCE", "DOT", "MIN_SPEED", "ARRIVE_GRACE", "SIDESTEP_TIME"}
     local gameDefaults = {DISTANCE = 3.5, REPEAT_DISTANCE = 4, DOT = .7071067811865476, MIN_SPEED = 12.5, ARRIVE_GRACE = .12, SIDESTEP_TIME = .25}
     local maxPreset = {DISTANCE = .1, REPEAT_DISTANCE = .1, DOT = -1, MIN_SPEED = 0, ARRIVE_GRACE = 1, SIDESTEP_TIME = 5}
-    local sprintKey = 0x10
     local checkInterval = .5
     local tolerance = .006
     local clusterSpan = 0x400
-    local scanDelay = 2.5
-    local minimumShown = 2
+
 
     local function Matches(value, target)
         value = tonumber(value)
@@ -2218,8 +2217,13 @@ do
         for _, entry in entries do found[entry.key] = (found[entry.key] or 0) + 1 end
         local summary = {}
         for _, key in keys do summary[#summary + 1] = key .. " x" .. (found[key] or 0) end
-        print(string.format("[MatchaVD] fast vault (%s, %d of %d entries): %s", how, #entries, #result, table.concat(summary, ", ")))
-        return if #entries > 0 then entries else nil
+        local distinct = 0
+        for _, key in keys do
+            if found[key] then distinct += 1 end
+        end
+        local success = distinct == #keys and #entries >= #keys
+        print(string.format("[MatchaVD] fast vault (%s, %d of %d entries): %s%s", how, #entries, #result, table.concat(summary, ", "), if success then "" else " - not enough, toggle stays hidden"))
+        return if success then entries else nil
     end
 
     local function Apply(entries, values)
@@ -2246,6 +2250,8 @@ do
         _G.MatchaVDVaultScan = session
     end
     local entries = session.Entries
+    vault.Ready = entries ~= nil
+    local requested = false
 
     local popup = Drawing.new("Text")
     if textFont then popup.Font = textFont end
@@ -2268,70 +2274,90 @@ do
         session.Entries = entries
         popup.Visible = false
         vault.Scanning = false
-    end
-
-    local watch = {NextFind = 0}
-    local transparencyOffset = visibleOffset - 0x49
-
-    local function LoadingScreenShown(now)
-        if not watch.Frame and now >= watch.NextFind then
-            watch.NextFind = now + 2
-            local gui = Players.LocalPlayer:FindFirstChild("PlayerGui")
-            local darkness = gui and gui:FindFirstChild("Darkness")
-            local frame = darkness and darkness:FindFirstChild("Frame")
-            watch.Frame = frame and frame.Address
-        end
-        if not watch.Frame then return false end
-        local transparency = memory_read("float", watch.Frame + transparencyOffset)
-        if not transparency or transparency ~= transparency or transparency < -.01 or transparency > 1.01 then
-            watch.Frame = nil
-            return false
-        end
-        return transparency < .5
+        vault.Ready = entries ~= nil
+        if vault.Ready and vault.RebuildMenu then vault.RebuildMenu() end
     end
 
     vault.ScanNow = function()
-        if not entries and not vault.Scanning then watch.Requested = true end
+        if not entries and not vault.Scanning then requested = true end
     end
 
     AddJob("Fast vault", false, function()
-        local sprinting = false
-        local shownSince, scanAt
-        local hiddenReads = 0
-
-        local function SetSprint(on)
-            if on ~= sprinting then
-                sprinting = on
-                if on then keypress(sprintKey) else keyrelease(sprintKey) end
-            end
-        end
-
         while Running() do
-            local now = tick()
-            if not entries then
-                if LoadingScreenShown(now) then
-                    shownSince, hiddenReads = shownSince or now, 0
-                elseif shownSince then
-                    hiddenReads += 1
-                    if hiddenReads >= 2 then
-                        print(string.format("[MatchaVD] fast vault: loading screen hidden after %.1f s%s", now - shownSince, if now - shownSince >= minimumShown then ", scanning" else ", too short, ignored"))
-                        if now - shownSince >= minimumShown then scanAt = now + scanDelay end
-                        shownSince, hiddenReads = nil, 0
-                    end
-                end
-                if watch.Requested or (scanAt and now >= scanAt) then
-                    watch.Requested, scanAt = false, nil
-                    ScanWithPopup()
-                end
+            if requested then
+                requested = false
+                if not entries then ScanWithPopup() end
             end
             if entries then
                 local wanted = if vault.Enabled then Desired() else gameDefaults
                 if not SameValues(session.Written, wanted) and Apply(entries, wanted) then session.Written = table.clone(wanted) end
             end
-            SetSprint(vault.Enabled and vault.Sprint and isrbxactive())
             Sleep(if entries then checkInterval else .1)
         end
-        SetSprint(false)
+    end)
+end
+
+do
+    local keyS = 0x53
+    local autoRotateOffset = tonumber(O.Humanoid and O.Humanoid.AutoRotate)
+    local rotationOffset = tonumber(O.Primitive and O.Primitive.Rotation)
+    local turnThreshold = math.cos(math.rad(1))
+
+    local function FaceCamera(rootAddress)
+        local camera = workspace.CurrentCamera
+        if not camera or not rotationOffset or not rootAddress then return end
+        local look = camera.CFrame.LookVector
+        local length = math.sqrt(look.X * look.X + look.Z * look.Z)
+        if length < .01 then return end
+        local dx, dz = look.X / length, look.Z / length
+        local primitive = memory_read("uintptr_t", rootAddress + primitiveOffset)
+        if not Valid(primitive) then return end
+        local rotation = primitive + rotationOffset
+        local currentX, currentZ = -memory_read("float", rotation + 8), -memory_read("float", rotation + 32)
+        if currentX * dx + currentZ * dz > turnThreshold then return end
+        local matrix = {-dz, 0, -dx, 0, 1, 0, dx, 0, -dz}
+        for i = 1, 9 do memory_write("float", rotation + (i - 1) * 4, matrix[i]) end
+    end
+
+    AddJob("Moonwalk", true, function()
+        if not autoRotateOffset then
+            print("[MatchaVD] moonwalk: no Humanoid.AutoRotate offset, moonwalk off")
+            return
+        end
+        local humanoid, root, character, nextLookup = nil, nil, nil, 0
+        local disabled = false
+
+        local function Restore()
+            if disabled and humanoid then memory_write("byte", humanoid + autoRotateOffset, 1) end
+            disabled = false
+        end
+
+        while Running() do
+            local now = tick()
+            if now >= nextLookup then
+                nextLookup = now + .5
+                local current = Players.LocalPlayer.Character
+                local address = current and current.Address
+                if address ~= character then
+                    disabled, character = false, address
+                    local found = current and current:FindFirstChild("Humanoid")
+                    local rootPart = current and current:FindFirstChild("HumanoidRootPart")
+                    humanoid, root = found and found.Address, rootPart and rootPart.Address
+                end
+            end
+            if bMoonwalk and humanoid and isrbxactive() and iskeypressed(keyS) then
+                if memory_read("byte", humanoid + autoRotateOffset) == 1 then
+                    memory_write("byte", humanoid + autoRotateOffset, 0)
+                end
+                disabled = true
+                FaceCamera(root)
+                Sleep(1 / 60)
+            else
+                Restore()
+                Sleep(if bMoonwalk then 1 / 60 else .25)
+            end
+        end
+        Restore()
     end)
 end
 
@@ -2355,7 +2381,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_auto_pallet = bAutoPallet,
         vd_crouch = bAutoCrouch,
         vd_vault = vault.Enabled,
-        vd_vault_sprint = vault.Sprint,
+        vd_moonwalk = bMoonwalk,
     }
     local apply = {
         vd_gen = function(v) bGeneratorESP = v == true end,
@@ -2375,7 +2401,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_auto_pallet = function(v) bAutoPallet = v == true end,
         vd_crouch = function(v) bAutoCrouch = v == true end,
         vd_vault = function(v) vault.Enabled = v == true end,
-        vd_vault_sprint = function(v) vault.Sprint = v == true end,
+        vd_moonwalk = function(v) bMoonwalk = v == true end,
     }
     local colours = {
         vd_gen_col = function(c) generatorColor = c end,
@@ -2446,8 +2472,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         Widget(section, "Toggle", id, id, label, defaults[id])
     end
 
-    pcall(UI.RemoveTab, tabName)
-    UI.AddTab(tabName, function(tab)
+    local function BuildTab(tab)
         local esp = Section(tab, "ESP", "Left")
         Toggle(esp, "vd_gen", "Generator ESP")
         Picker2(esp, "vd_gen_col", generatorColor, "vd_gen_done", completedColor)
@@ -2477,12 +2502,23 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         Picker(main, "vd_parry_col", parryRangeColor)
         Toggle(main, "vd_auto_pallet", "Auto drop pallet on killer")
         Toggle(main, "vd_crouch", "Auto crouch (against Abysswalker)")
-        Toggle(main, "vd_vault", "Always fast vault")
-        Toggle(main, "vd_vault_sprint", "Hold sprint")
-        Widget(main, "Button", "vd_vault_scan", "Scan for fast vault now", function()
-            if vault.ScanNow then vault.ScanNow() end
-        end)
-    end)
+        Toggle(main, "vd_moonwalk", "Moonwalk (hold S)")
+
+        local vaulting = Section(tab, "Fast vault", "Right")
+        if vault.Ready then
+            Toggle(vaulting, "vd_vault", "Always fast vault")
+        else
+            Widget(vaulting, "Button", "vd_vault_scan", "Scan for always fast vault", function()
+                if vault.ScanNow then vault.ScanNow() end
+            end)
+        end
+    end
+
+    vault.RebuildMenu = function()
+        pcall(UI.RemoveTab, tabName)
+        UI.AddTab(tabName, BuildTab)
+    end
+    vault.RebuildMenu()
 
     AddJob("Menu sync", false, function()
         local last = {}
