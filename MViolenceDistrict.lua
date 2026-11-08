@@ -189,7 +189,6 @@ do
         local low, high = buffer.readu32(result, 0), buffer.readu32(result, 4)
         blockReads = low + high * 4294967296 == memory_read("uintptr_t", workspace.Address)
     end
-    print("[MatchaVD] block memory reads " .. (if blockReads then "on" else "off (falling back to single reads)"))
 end
 
 local function ReadBlock(address, size)
@@ -258,7 +257,7 @@ if memoryReady then
                 break
             end
         end
-        print(string.format("[MatchaVD] Instance.Name offset 0x%X is wrong, using %s", nameOffset, if found then string.format("0x%X", found) else "nothing (memory scans off)"))
+        if not found then print(string.format("[MatchaVD] Instance.Name offset 0x%X is wrong and no other offset matched, memory scans off", nameOffset)) end
         nameOffset = found
         memoryReady = found ~= nil
     end
@@ -949,7 +948,6 @@ local function CheckAttack(now)
     if math.abs(offset.Y) > height / 2 + localHalfHeight then return end
     if Vector3.new(offset.X, 0, offset.Z).Magnitude > radius then return end
     parry.Attack, parry.LastParry = nil, now
-    print(string.format("[parry] %s d=%.1f after %.2fs", config.Name, offset.Magnitude, now - attack.Started))
     task.spawn(PressParry)
 end
 
@@ -2037,7 +2035,6 @@ AddJob("Main", false, function()
                 local count = ScanWindows(map)
                 if count and count >= minimumWindows and count == windowCount then
                     stableScans += 1
-                    if stableScans >= windowStableScans then print("[MatchaVD] " .. count .. " windows, scanning stopped") end
                 else
                     stableScans = 0
                 end
@@ -2190,7 +2187,6 @@ do
     end
 
     local function Scan(desired)
-        print("[MatchaVD] fast vault: scanning the game's memory, this takes a few seconds")
         local ok, result = pcall(getgc, keys)
         if not ok or type(result) ~= "table" then
             print("[MatchaVD] fast vault: getgc failed: " .. tostring(result))
@@ -2222,7 +2218,7 @@ do
             if found[key] then distinct += 1 end
         end
         local success = distinct == #keys and #entries >= #keys
-        print(string.format("[MatchaVD] fast vault (%s, %d of %d entries): %s%s", how, #entries, #result, table.concat(summary, ", "), if success then "" else " - not enough, toggle stays hidden"))
+        if not success then print(string.format("[MatchaVD] fast vault scan failed (%s, %d of %d entries): %s", how, #entries, #result, table.concat(summary, ", "))) end
         return if success then entries else nil
     end
 
