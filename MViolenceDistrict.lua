@@ -19,7 +19,7 @@ local daggerColor = Color3.fromRGB(170, 120, 255)
 local daggerEndColor = Color3.fromRGB(255, 80, 80)
 local bTrapESP = true
 local bZombieESP = true
-local bAutoPallet = true
+local bAutoPallet = false
 local bAutoCrouch = true
 local bInfoHud = true
 local bKickedColor = true
@@ -46,7 +46,7 @@ local loopInterval = 1 / 60
 local bDebugStats = false
 local vault = {Enabled = false}
 local bMoonwalk = false
-local bPumpkinESP = true
+local bPumpkinESP = false
 local pumpkinColor = Color3.fromRGB(255, 165, 40)
 
 local RunService = game:GetService("RunService")
@@ -1713,7 +1713,7 @@ do
         {Attribute = "Immobile", Name = "Stunned", Kind = "Bool", TrueColor = style.Working},
         {Attribute = "IsCarrying", Name = "Carrying survivor", Kind = "Bool", TrueColor = style.Working},
         {Attribute = "IsChasing", Name = "Chasing survivor", Kind = "Bool", TrueColor = style.Working},
-        {Attribute = "speedboost", Name = "Speed multiplier", Kind = "Number", Prefix = "x", Decimals = 2, NormalValue = 1, ChangedColor = style.Working},
+        {Attribute = "speedboost", Name = "Speed multiplier", Kind = "Number", Prefix = "x", Decimals = 2, NormalValue = 1, Missing = 1, ChangedColor = style.Working},
     }
 
     local hud = {X = 40, Y = 200, Width = 230, Lines = {}, NextGenerators = 0, NextKiller = 0, NextRead = 0, Values = {}, Shown = {}, ReadIndex = 0, WasDown = false}
@@ -1768,6 +1768,7 @@ do
             local state = value == true or value == "true"
             return if state then "true" else "false", if state and shown.TrueColor then shown.TrueColor else style.TextColor
         end
+        if value == nil then value = shown.Missing end
         if value == nil then return "?", style.TextColor end
         if shown.Kind == "Text" then
             local text = tostring(value)
@@ -2147,7 +2148,7 @@ AddJob("Skill check", true, function()
     local guiRotationOffset = visibleOffset - 0x19
     local check, line, goal, trapPerfect
     local nextFind = 0
-    local pressed, lastNeedle, lastGoal, step = false, 0, 0, 0
+    local pressed, lastNeedle, lastGoal, step, movedAt, seenNeedle = false, 0, 0, 0, 0, nil
 
     local function Find()
         local gui = player:FindFirstChild("PlayerGui")
@@ -2173,13 +2174,14 @@ AddJob("Skill check", true, function()
             Sleep(.5)
         else
             local now = tick()
-            if not (check and line and goal) and now >= nextFind then
-                nextFind = now + 2
+            if now >= nextFind and (lastNeedle == 0 or not (check and line and goal)) then
+                nextFind = now + 1
                 Find()
             end
             if check and line and goal then
-                if memory_read("byte", check.Address + visibleOffset) == 1 then
-                    local needle = memory_read("float", line.Address + guiRotationOffset)
+                local needle = memory_read("float", line.Address + guiRotationOffset)
+                if needle ~= seenNeedle then seenNeedle, movedAt = needle, now end
+                if memory_read("byte", check.Address + visibleOffset) == 1 and now - movedAt <= 1.5 then
                     local zone = ZoneStart()
                     if needle < lastNeedle - 30 or (zone and math.abs(zone - lastGoal) > 1) then
                         pressed, step = false, 0
@@ -2365,7 +2367,7 @@ do
     end
 
     vault.ScanNow = function()
-        if not entries and not vault.Scanning then requested = true end
+        if not entries and not vault.Scanning and not requested then requested = "Manual" end
     end
 
     local fadeOffset = visibleOffset - 0x49
@@ -2397,13 +2399,14 @@ do
 
     AddJob("Fast vault", false, function()
         local startupUntil = tick() + 3
+        local retryAt
         while Running() do
             if not entries and not vault.Scanning then
                 local now = tick()
                 if startupUntil and now <= startupUntil then
                     if vault.Enabled and world.LocalTeam == "Survivors" and world.LocalRoot then
                         startupUntil = nil
-                        requested = true
+                        requested = "Auto"
                     end
                 else
                     startupUntil = nil
@@ -2411,12 +2414,24 @@ do
                 WatchLoadingScreen(now)
                 if loading.ScanAt and now >= loading.ScanAt then
                     loading.ScanAt = nil
-                    requested = true
+                    requested = "Auto"
+                end
+                if retryAt and now >= retryAt then
+                    retryAt = nil
+                    requested = "Auto"
                 end
             end
+            if requested == "Auto" and world.LocalTeam == "Killer" then
+                requested, retryAt = false, nil
+            end
             if requested then
+                local kind = requested
                 requested = false
-                if not entries then ScanWithPopup() end
+                if not entries then
+                    ScanWithPopup()
+                    if not entries and (kind == "Auto" or retryAt) then retryAt = tick() + 2 end
+                end
+                if entries then retryAt = nil end
             end
             if entries then
                 local wanted = if vault.Enabled then Desired() else gameDefaults
