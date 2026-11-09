@@ -1061,7 +1061,6 @@ do
     local hitRadius = 1.8
     local legHalfHeight = 1
     local headTop = .5
-    local dominanceRatio = 2.5
     local hitSamples = 4
     local throwers, targets, motions = {}, {}, {}
     local ownRoot, ownIsSurvivor
@@ -1181,18 +1180,15 @@ do
         motion.LastPosition, motion.LastTime = position, now
     end
 
-    local function LaunchAngle(distance, rise)
-        if distance < .5 then return 0 end
-        local speedSquared = daggerSpeed * daggerSpeed
-        local angle, adjustedRise = 0, rise
-        for _ = 1, 3 do
-            local discriminant = speedSquared * speedSquared - daggerGravity * (daggerGravity * distance * distance + 2 * adjustedRise * speedSquared)
-            if discriminant < 0 then return math.pi / 4 end
-            angle = math.atan((speedSquared - math.sqrt(discriminant)) / (daggerGravity * distance))
-            local flightTime = distance / (daggerSpeed * math.cos(angle))
-            adjustedRise = rise - daggerGravity * daggerLag * flightTime / 2
+    local function DrawStraight(origin, finish, colors)
+        local previousX, previousY
+        for i = 0, 40 do
+            local fraction = i / 40
+            local point = origin + (finish - origin) * fraction
+            local x, y = Project(point.X, point.Y, point.Z)
+            if x and previousX then DrawLine(previousX, previousY, x, y, colors[math.floor(fraction * gradientSteps)]) end
+            previousX, previousY = x, y
         end
-        return angle
     end
 
     local function BodyShape(target, t)
@@ -1270,20 +1266,6 @@ do
         end
     end
 
-    local function DominantIndex(origin, positions)
-        local nearest, nearestDistance, secondDistance
-        for index, position in positions do
-            local distance = (position - origin).Magnitude
-            if not nearestDistance or distance < nearestDistance then
-                nearest, nearestDistance, secondDistance = index, distance, nearestDistance
-            elseif not secondDistance or distance < secondDistance then
-                secondDistance = distance
-            end
-        end
-        if nearest and (not secondDistance or nearestDistance * dominanceRatio <= secondDistance) then return nearest end
-        return nil
-    end
-
     local function TargetBody()
         if not frame.Ready then return nil end
         local best, bestDistance
@@ -1308,42 +1290,24 @@ do
         end
         local origin = rootPosition + Vector3.new(0, daggerHeight, 0)
         local look = rootFrame.LookVector
-        local flat = Vector3.new(look.X, 0, look.Z)
-        if flat.Magnitude < .01 then
+        if look.Magnitude < .01 then
             thrower.Origin = nil
             return
         end
-        flat = flat.Unit
-        local bestPosition, bestEndY, bestDot
-        local function Consider(position, endY)
-            local offset = Vector3.new(position.X - origin.X, 0, position.Z - origin.Z)
-            if offset.Magnitude < .5 then return end
-            local dot = offset.Unit:Dot(flat)
-            if not bestDot or dot > bestDot then
-                bestPosition, bestEndY, bestDot = position, endY, dot
-            end
-        end
-        local positions, ends = {}, {}
+        local farthest
         for _, target in targets do
             if target.Team == "Survivors" and target.Position then
-                positions[#positions + 1], ends[#ends + 1] = target.Position, target.Bottom
+                local distance = (target.Position - origin).Magnitude
+                if not farthest or distance > farthest then farthest = distance end
             end
         end
         local ownPosition = ownIsSurvivor and ownRoot and ownRoot.Position
-        if ownPosition then positions[#positions + 1], ends[#ends + 1] = ownPosition, ownPosition.Y - groundOffset end
-        local dominant = DominantIndex(origin, positions)
-        if dominant then
-            bestPosition, bestEndY = positions[dominant], ends[dominant]
-        else
-            for index, position in positions do Consider(position, ends[index]) end
-        end
-        local angle = 0
-        if bestPosition then
-            angle = LaunchAngle(Vector3.new(bestPosition.X - origin.X, 0, bestPosition.Z - origin.Z).Magnitude, bestPosition.Y - origin.Y)
+        if ownPosition then
+            local distance = (ownPosition - origin).Magnitude
+            if not farthest or distance > farthest then farthest = distance end
         end
         thrower.Origin = origin
-        thrower.Velocity = (flat * math.cos(angle) + Vector3.new(0, math.sin(angle), 0)) * daggerSpeed
-        thrower.EndY = bestEndY
+        thrower.Finish = origin + look.Unit * (if farthest then farthest + 10 else 100)
     end
 
     UpdateDaggerAim = function(now, reset)
@@ -1397,8 +1361,8 @@ do
                     local look = Vector3.new(frame.LX, frame.LY, frame.LZ)
                     local right = Vector3.new(frame.RX, frame.RY, frame.RZ)
                     DrawArc(origin, look * daggerSpeed, right * localRightOffset + look * localForwardOffset, thrower.EndY, if thrower.Hit then hitGradient else missGradient)
-                elseif thrower.Origin then
-                    DrawArc(thrower.Origin, thrower.Velocity, nil, thrower.EndY, gradient)
+                elseif thrower.Origin and thrower.Finish then
+                    DrawStraight(thrower.Origin, thrower.Finish, gradient)
                 end
             end
         end
@@ -2398,15 +2362,58 @@ do
         popup.Visible = false
         vault.Scanning = false
         vault.Ready = entries ~= nil
-        if vault.Ready and vault.RebuildMenu then vault.RebuildMenu() end
     end
 
     vault.ScanNow = function()
         if not entries and not vault.Scanning then requested = true end
     end
 
+    local fadeOffset = visibleOffset - 0x49
+    local loading = {NextFind = 0, Above = 0}
+
+    local function WatchLoadingScreen(now)
+        if not isrbxactive() then
+            loading.Frame, loading.BelowSince, loading.Above, loading.NextFind = nil, nil, 0, 0
+            return
+        end
+        if now >= loading.NextFind then
+            loading.NextFind = now + 2
+            local gui = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
+            local darkness = gui and gui:FindFirstChild("Darkness")
+            loading.Frame = darkness and darkness:FindFirstChild("Frame")
+        end
+        local frameAddress = loading.Frame and loading.Frame.Address
+        local value = frameAddress and memory_read("float", frameAddress + fadeOffset)
+        if type(value) ~= "number" or value ~= value then return end
+        if value < .5 then
+            loading.BelowSince = loading.BelowSince or now
+            loading.Above = 0
+        else
+            loading.Above += 1
+            if loading.Above == 2 and loading.BelowSince and now - loading.BelowSince >= 2 then loading.ScanAt = now + 10 end
+            if loading.Above >= 2 then loading.BelowSince = nil end
+        end
+    end
+
     AddJob("Fast vault", false, function()
+        local startupUntil = tick() + 3
         while Running() do
+            if not entries and not vault.Scanning then
+                local now = tick()
+                if startupUntil and now <= startupUntil then
+                    if vault.Enabled and world.LocalTeam == "Survivors" and world.LocalRoot then
+                        startupUntil = nil
+                        requested = true
+                    end
+                else
+                    startupUntil = nil
+                end
+                WatchLoadingScreen(now)
+                if loading.ScanAt and now >= loading.ScanAt then
+                    loading.ScanAt = nil
+                    requested = true
+                end
+            end
             if requested then
                 requested = false
                 if not entries then ScanWithPopup() end
@@ -2647,13 +2654,10 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         Widget(parrying, "SliderFloat", "vd_parry_lag", "vd_parry_lag", "Ping compensation (s)", 0, .6, defaults.vd_parry_lag, "%.2f")
 
         local vaulting = Section(tab, "Fast vault", "Right")
-        if vault.Ready then
-            Toggle(vaulting, "vd_vault", "Always fast vault")
-        else
-            Widget(vaulting, "Button", "vd_vault_scan", "Scan for always fast vault", function()
-                if vault.ScanNow then vault.ScanNow() end
-            end)
-        end
+        Toggle(vaulting, "vd_vault", "Always fast vault")
+        Widget(vaulting, "Button", "vd_vault_scan", "Scan for always fast vault", function()
+            if vault.ScanNow then vault.ScanNow() end
+        end)
     end
 
     vault.RebuildMenu = function()
