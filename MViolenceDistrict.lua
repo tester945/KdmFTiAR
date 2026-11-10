@@ -273,7 +273,7 @@ end
 
 local parry = {History = {}, LastParry = 0, NextRefresh = 0, AnimationIds = {}, CrouchAnimations = {
     ["100014992013740"] = {Name = "Abysswalker lunge", Duration = 1.1, Range = 30},
-}, RenderHistory = {}}
+}, RenderHistory = {}, KillerRenderHistory = {}}
 parry.Dot = Drawing.new("Circle")
 parry.Dot.Filled = true
 parry.Dot.Radius = 4
@@ -1115,13 +1115,27 @@ end
 local function RenderParry()
     local killer = parry.Killer
     if not killer or parry.Team ~= "Survivors" or not parry.KillerPosition then return end
-    local position = PredictedKiller(killer.Root.Position or parry.KillerPosition)
+    local now = tick()
+    local position = killer.Root.Position or parry.KillerPosition
+    local killerHistory = parry.KillerRenderHistory
+    if parry.KillerRenderRoot ~= killer.Root then
+        parry.KillerRenderRoot = killer.Root
+        table.clear(killerHistory)
+    end
+    local newest = killerHistory[#killerHistory]
+    if newest and now - newest.Time > .5 then table.clear(killerHistory) end
+    killerHistory[#killerHistory + 1] = {Time = now, Position = position}
+    while #killerHistory > 2 and now - killerHistory[2].Time >= .15 do table.remove(killerHistory, 1) end
+    local oldest = killerHistory[1]
+    if parryTuning.Prediction > 0 and now - oldest.Time > .03 then
+        local velocity = (position - oldest.Position) / (now - oldest.Time)
+        position += Vector3.new(velocity.X, 0, velocity.Z) * parryTuning.Prediction
+    end
     local attack = parry.Attack
     local radius = AttackRadius(attack and attack.Config or attackDefaults)
     local color = if attack then parryAttackColor else parryRangeColor
     local cx, cy, cz = position.X, position.Y, position.Z
     DrawGroundCircle(cx, cy, cz, radius, color)
-    local now = tick()
     local history = parry.RenderHistory
     local root = parry.LocalRoot
     local current = root and root.Position
@@ -1156,7 +1170,11 @@ do
         ["101443662521580"] = "Throw",
         ["127622545856523"] = "Throw",
     }
-    local daggerSpeed = 163.5
+    local charge = {Max = 163.5, Min = 68, PerSecond = 156, Offset = 6.3}
+    charge.At = function(now)
+        local held = if charge.HeldSince then now - charge.HeldSince else 0
+        return math.clamp(held * charge.PerSecond + charge.Offset, charge.Min, charge.Max)
+    end
     local daggerGravity = 96.5
     local daggerLag = .0375
     local aimTimeout = 1
@@ -1170,7 +1188,7 @@ do
     local gradientSteps = 32
     local hitRadius = 1.8
     local legHalfHeight = 1
-    local headTop = .5
+    local headTop = 1
     local hitSamples = 4
     local throwers, targets, motions = {}, {}, {}
     local ownRoot, ownIsSurvivor
@@ -1441,6 +1459,7 @@ do
             end
         end
         local leftHeld = ismouse1pressed()
+        if leftHeld == true then charge.HeldSince = charge.HeldSince or now else charge.HeldSince = nil end
         for _, thrower in throwers do
             UpdateAimState(thrower.State, thrower.Animator, now)
             thrower.Aiming = thrower.State.Aiming == true and (not thrower.IsLocal or leftHeld == true)
@@ -1453,7 +1472,7 @@ do
                     thrower.EndY = endY
                     if camera then
                         local cframe = camera.CFrame
-                        thrower.Hit = ArcHits(cframe.Position, cframe.LookVector * daggerSpeed, endY)
+                        thrower.Hit = ArcHits(cframe.Position, cframe.LookVector * charge.At(now), endY)
                     end
                 else
                     EnemyArc(thrower)
@@ -1464,13 +1483,15 @@ do
     end
 
     RenderDaggerTrajectory = function()
+        local now = tick()
+        if ismouse1pressed() == true then charge.HeldSince = charge.HeldSince or now else charge.HeldSince = nil end
         for _, thrower in throwers do
             if thrower.Aiming then
                 if thrower.IsLocal then
                     local origin = Vector3.new(frame.PX, frame.PY, frame.PZ)
                     local look = Vector3.new(frame.LX, frame.LY, frame.LZ)
                     local right = Vector3.new(frame.RX, frame.RY, frame.RZ)
-                    DrawArc(origin, look * daggerSpeed, right * localRightOffset + look * localForwardOffset, thrower.EndY, if thrower.Hit then hitGradient else missGradient)
+                    DrawArc(origin, look * charge.At(now), right * localRightOffset + look * localForwardOffset, thrower.EndY, if thrower.Hit then hitGradient else missGradient)
                 elseif thrower.Origin and thrower.Finish then
                     DrawStraight(thrower.Origin, thrower.Finish, gradient)
                 end
