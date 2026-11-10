@@ -273,8 +273,15 @@ end
 
 local parry = {History = {}, LastParry = 0, NextRefresh = 0, AnimationIds = {}, CrouchAnimations = {
     ["100014992013740"] = {Name = "Abysswalker lunge", Duration = 1.1, Range = 30},
-}}
-local world = {NextRefresh = 0, NextKillerType = 0, KillerType = ""}
+}, RenderHistory = {}}
+parry.Dot = Drawing.new("Circle")
+parry.Dot.Filled = true
+parry.Dot.Radius = 4
+parry.Dot.NumSides = 16
+parry.Dot.Transparency = 1
+parry.Dot.Visible = false
+allDrawings[#allDrawings + 1] = parry.Dot
+local world ={NextRefresh = 0, NextKillerType = 0, KillerType = ""}
 
 local function ReadStdString(address)
     local capacity = memory_read("uintptr_t", address + 0x18)
@@ -1114,11 +1121,23 @@ local function RenderParry()
     local color = if attack then parryAttackColor else parryRangeColor
     local cx, cy, cz = position.X, position.Y, position.Z
     DrawGroundCircle(cx, cy, cz, radius, color)
-    local past = PastLocalPosition(tick())
-    if past then
-        DrawGroundCircle(past.X, past.Y, past.Z, localRadius, color)
-        local x, y = Project(past.X, past.Y + 3, past.Z)
-        if x then DrawText(x, y, "Past you", color) end
+    local now = tick()
+    local history = parry.RenderHistory
+    local root = parry.LocalRoot
+    local current = root and root.Position
+    if current then
+        local last = history[#history]
+        if last and now - last.Time > .5 then table.clear(history) end
+        history[#history + 1] = {Time = now, Position = current}
+        local target = now - parryTuning.PastTime
+        while #history > 2 and history[2].Time <= target do table.remove(history, 1) end
+        local first, second = history[1], history[2]
+        local past = first.Position
+        if second and first.Time < target and second.Time > first.Time then
+            past = first.Position:Lerp(second.Position, math.clamp((target - first.Time) / (second.Time - first.Time), 0, 1))
+        end
+        local x, y = Project(past.X, past.Y, past.Z)
+        if x then parry.DotX, parry.DotY, parry.DotColor = x, y, color end
     end
     if attack then
         local x, y = Project(cx, cy + 4, cz)
@@ -2059,6 +2078,7 @@ end
 local function Render()
     local started = os.clock()
     usedLines, usedTexts, usedTriangles = 0, 0, 0
+    parry.DotX = nil
     UpdateCamera(tick())
     if frame.Ready and not vault.Scanning then
         if bPalletESP then
@@ -2079,6 +2099,20 @@ local function Render()
         RenderMapEntities()
         if bShowParryRange then RenderParry() end
         if bDaggerTrajectory then RenderDaggerTrajectory() end
+    end
+    local dot = parry.Dot
+    if parry.DotX then
+        if parry.DotShownX ~= parry.DotX or parry.DotShownY ~= parry.DotY then
+            parry.DotShownX, parry.DotShownY = parry.DotX, parry.DotY
+            dot.Position = Vector2.new(parry.DotX, parry.DotY)
+        end
+        if parry.DotShownColor ~= parry.DotColor then
+            parry.DotShownColor = parry.DotColor
+            dot.Color = parry.DotColor
+        end
+        if not dot.Visible then dot.Visible = true end
+    elseif dot.Visible then
+        dot.Visible = false
     end
     RenderPumpkins(bPumpkinESP and frame.Ready and not vault.Scanning)
     RenderInfoHud(bInfoHud and not vault.Scanning)
@@ -2209,7 +2243,7 @@ AddJob("Skill check", true, function()
             end
         end
     end
-    local check, line, goal, trapPerfect
+    local check, line, goal, trapPerfect, trapGoal
     local nextFind = 0
     local pressed, lastNeedle, lastGoal, step, movedAt, seenNeedle = false, 0, 0, 0, 0, nil
 
@@ -2250,6 +2284,7 @@ AddJob("Skill check", true, function()
         line = check and check:FindFirstChild("Line")
         goal = check and check:FindFirstChild("Goal")
         trapPerfect = check and check:FindFirstChild("TrapPerfect")
+        trapGoal = check and check:FindFirstChild("TrapGoal")
     end
 
     local function ZoneStart()
@@ -2258,12 +2293,15 @@ AddJob("Skill check", true, function()
         if trapPerfect and memory_read("byte", trapPerfect.Address + visibleOffsetUsed) == 1 then
             return memory_read("float", trapPerfect.Address + guiRotationOffset)
         end
+        if trapGoal and memory_read("byte", trapGoal.Address + visibleOffsetUsed) == 1 then
+            return memory_read("float", trapGoal.Address + guiRotationOffset)
+        end
         return nil
     end
 
     while Running() do
         if not bAutoSkillCheck or not isrbxactive() then
-            check, line, goal, trapPerfect, nextFind = nil, nil, nil, nil, 0
+            check, line, goal, trapPerfect, trapGoal, nextFind = nil, nil, nil, nil, nil, 0
             Sleep(.5)
         else
             local now = tick()
@@ -2303,7 +2341,7 @@ AddJob("Skill check", true, function()
                 end
             end
             stats.Skill += 1
-            Sleep(if pressed or lastNeedle == 0 then .05 else 1 / 60)
+            Sleep(if lastNeedle == 0 then .05 else 1 / 60)
         end
     end
 end)
