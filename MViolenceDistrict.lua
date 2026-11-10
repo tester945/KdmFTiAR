@@ -1,3 +1,4 @@
+local function Main()
 if game.GameId == 6739698191 then
 
 local generatorColor = Color3.fromRGB(157, 159, 255)
@@ -96,7 +97,7 @@ local attackDefaults = {Windup = 0, Linger = .8, Height = 7}
 local parrySafety = .1
 local localRadius = 1.5
 local localHalfHeight = 2.5
-local parryTuning = {Prediction = 0, Range = 6.9, HumanizeMs = 60, PastTime = .3}
+local parryTuning = {Prediction = .1, Range = 6.9, HumanizeMs = 60, PastTime = .3}
 local parryCooldown = 1
 local parryRangeColor = Color3.fromRGB(255, 255, 255)
 local parryAttackColor = Color3.fromRGB(255, 70, 70)
@@ -117,6 +118,34 @@ local windows = {}
 
 local function Running()
     return _G.MatchaVDRunId == runId
+end
+
+local startJobId = game.JobId
+
+local function ServerChanged()
+    _G.MatchaVDRunId = nil
+    if _G.MatchaVDConnection then
+        pcall(_G.MatchaVDConnection.Disconnect, _G.MatchaVDConnection)
+        _G.MatchaVDConnection = nil
+    end
+    for _, object in allDrawings do
+        if type(object) == "table" then (object.Square or object.Object):Remove() else object:Remove() end
+    end
+    _G.MatchaVDDrawings = nil
+    keyrelease(0xA2)
+    keyrelease(0x20)
+    if type(UI) == "table" and type(UI.RemoveTab) == "function" then pcall(UI.RemoveTab, "Violence District") end
+    print("[MatchaVD] server changed, restarting once the new server has loaded")
+    task.spawn(function()
+        while true do
+            task.wait(.5)
+            if _G.MatchaVDRunId ~= nil then return end
+            local ok, jobId = pcall(function() return game.JobId end)
+            if ok and jobId ~= "" and jobId ~= startJobId and game:IsLoaded() and game:GetService("Players").LocalPlayer then break end
+        end
+        task.wait(1)
+        if _G.MatchaVDRunId == nil then Main() end
+    end)
 end
 
 local function Valid(pointer)
@@ -164,6 +193,11 @@ end
 
 task.spawn(function()
     while Running() do
+        local jobOk, jobId = pcall(function() return game.JobId end)
+        if not jobOk or jobId ~= startJobId then
+            ServerChanged()
+            return
+        end
         local started = os.clock()
         local now = tick() + scheduler.Tick / 2
         local jobs = scheduler.Jobs
@@ -968,6 +1002,7 @@ local function UpdateParry(now)
     if now >= parry.NextRefresh then
         parry.NextRefresh = NextSlot(now, .12)
         RefreshParry()
+        parryTuning.PastTime = math.clamp((tonumber(GetPingValue()) or 0) / 1000, 0, .6)
     end
     if not parry.Killer or parry.Team ~= "Survivors" then
         parry.Attack, parry.KillerPosition = nil, nil
@@ -1009,14 +1044,7 @@ for i = 0, parryCircleSegments - 1 do
     circleCos[i], circleSin[i] = math.cos(angle), math.sin(angle)
 end
 
-local function RenderParry()
-    local killer = parry.Killer
-    if not killer or parry.Team ~= "Survivors" or not parry.KillerPosition then return end
-    local position = PredictedKiller(killer.Root.Position or parry.KillerPosition)
-    local attack = parry.Attack
-    local radius = AttackRadius(attack and attack.Config or attackDefaults)
-    local color = if attack then parryAttackColor else parryRangeColor
-    local cx, cy, cz = position.X, position.Y, position.Z
+local function DrawGroundCircle(cx, cy, cz, radius, color)
     local firstX, firstY = Project(cx + radius, cy, cz)
     local previousX, previousY = firstX, firstY
     for i = 1, parryCircleSegments do
@@ -1028,6 +1056,23 @@ local function RenderParry()
         end
         if x and previousX then DrawLine(previousX, previousY, x, y, color) end
         previousX, previousY = x, y
+    end
+end
+
+local function RenderParry()
+    local killer = parry.Killer
+    if not killer or parry.Team ~= "Survivors" or not parry.KillerPosition then return end
+    local position = PredictedKiller(killer.Root.Position or parry.KillerPosition)
+    local attack = parry.Attack
+    local radius = AttackRadius(attack and attack.Config or attackDefaults)
+    local color = if attack then parryAttackColor else parryRangeColor
+    local cx, cy, cz = position.X, position.Y, position.Z
+    DrawGroundCircle(cx, cy, cz, radius, color)
+    local past = PastLocalPosition(tick())
+    if past then
+        DrawGroundCircle(past.X, past.Y, past.Z, localRadius, color)
+        local x, y = Project(past.X, past.Y + 3, past.Z)
+        if x then DrawText(x, y, "Past you", color) end
     end
     if attack then
         local x, y = Project(cx, cy + 4, cz)
@@ -2245,6 +2290,7 @@ do
     local gameDefaults = {DISTANCE = 3.5, REPEAT_DISTANCE = 4, DOT = .7071067811865476, MIN_SPEED = 12.5, ARRIVE_GRACE = .12, SIDESTEP_TIME = .25}
     local maxPreset = {DISTANCE = .1, REPEAT_DISTANCE = .1, DOT = -1, MIN_SPEED = 0, ARRIVE_GRACE = 1, SIDESTEP_TIME = 5}
     local checkInterval = .5
+    local maxAutoRetries = 3
     local tolerance = .006
     local clusterSpan = 0x400
 
@@ -2400,6 +2446,7 @@ do
     AddJob("Fast vault", false, function()
         local startupUntil = tick() + 3
         local retryAt
+        local autoFailures = 0
         while Running() do
             if not entries and not vault.Scanning then
                 local now = tick()
@@ -2414,6 +2461,7 @@ do
                 WatchLoadingScreen(now)
                 if loading.ScanAt and now >= loading.ScanAt then
                     loading.ScanAt = nil
+                    autoFailures = 0
                     requested = "Auto"
                 end
                 if retryAt and now >= retryAt then
@@ -2421,7 +2469,7 @@ do
                     requested = "Auto"
                 end
             end
-            if requested == "Auto" and world.LocalTeam == "Killer" then
+            if requested == "Auto" and world.LocalTeam ~= "Survivors" then
                 requested, retryAt = false, nil
             end
             if requested then
@@ -2429,9 +2477,12 @@ do
                 requested = false
                 if not entries then
                     ScanWithPopup()
-                    if not entries and (kind == "Auto" or retryAt) then retryAt = tick() + 2 end
+                    if not entries and kind == "Auto" then
+                        autoFailures += 1
+                        if autoFailures < maxAutoRetries then retryAt = tick() + 2 end
+                    end
                 end
-                if entries then retryAt = nil end
+                if entries then retryAt, autoFailures = nil, 0 end
             end
             if entries then
                 local wanted = if vault.Enabled then Desired() else gameDefaults
@@ -2528,10 +2579,9 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_vault = vault.Enabled,
         vd_moonwalk = bMoonwalk,
         vd_pumpkin = bPumpkinESP,
-        vd_parry_pred = parryTuning.Prediction,
+        vd_parry_predict = parryTuning.Prediction,
         vd_parry_dist = parryTuning.Range,
         vd_parry_human = parryTuning.HumanizeMs,
-        vd_parry_lag = parryTuning.PastTime,
     }
     local apply = {
         vd_gen = function(v) bGeneratorESP = v == true end,
@@ -2553,10 +2603,9 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_vault = function(v) vault.Enabled = v == true end,
         vd_moonwalk = function(v) bMoonwalk = v == true end,
         vd_pumpkin = function(v) bPumpkinESP = v == true end,
-        vd_parry_pred = function(v) parryTuning.Prediction = math.clamp(tonumber(v) or 0, 0, .5) end,
+        vd_parry_predict = function(v) parryTuning.Prediction = math.clamp(tonumber(v) or .1, 0, .5) end,
         vd_parry_dist = function(v) parryTuning.Range = math.clamp(tonumber(v) or 6.9, 2, 15) end,
         vd_parry_human = function(v) parryTuning.HumanizeMs = math.clamp(tonumber(v) or 60, 0, 200) end,
-        vd_parry_lag = function(v) parryTuning.PastTime = math.clamp(tonumber(v) or .3, 0, .6) end,
     }
     local colours = {
         vd_gen_col = function(c) generatorColor = c end,
@@ -2661,12 +2710,11 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
 
         local parrying = Section(tab, "React parry", "Right")
         Toggle(parrying, "vd_parry", "React parry")
-        Toggle(parrying, "vd_parry_range", "Show parry range")
+        Toggle(parrying, "vd_parry_range", "Visualize react parry")
         Picker(parrying, "vd_parry_col", parryRangeColor)
-        Widget(parrying, "SliderFloat", "vd_parry_pred", "vd_parry_pred", "Killer prediction (s)", 0, .5, defaults.vd_parry_pred, "%.2f")
+        Widget(parrying, "SliderFloat", "vd_parry_predict", "vd_parry_predict", "Killer prediction (s)", 0, .5, defaults.vd_parry_predict, "%.2f")
         Widget(parrying, "SliderFloat", "vd_parry_dist", "vd_parry_dist", "Range (studs)", 2, 15, defaults.vd_parry_dist, "%.1f")
         Widget(parrying, "SliderInt", "vd_parry_human", "vd_parry_human", "Humanize (max ms)", 0, 200, defaults.vd_parry_human)
-        Widget(parrying, "SliderFloat", "vd_parry_lag", "vd_parry_lag", "Ping compensation (s)", 0, .6, defaults.vd_parry_lag, "%.2f")
 
         local vaulting = Section(tab, "Fast vault", "Right")
         Toggle(vaulting, "vd_vault", "Always fast vault")
@@ -2723,3 +2771,6 @@ print("[MatchaVD] loaded")
 else
     print("Not in Violence District")
 end
+end
+
+Main()
