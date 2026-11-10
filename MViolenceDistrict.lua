@@ -391,6 +391,8 @@ do
             if name ~= "" then
                 valid = true
                 map[name] = entry
+                local lower = string.lower(name)
+                if not map[lower] then map[lower] = entry end
             end
         end
         return if valid then map else nil
@@ -453,7 +455,7 @@ do
                 end
             end
             if reader.Entries then
-                local entry = reader.Entries[name]
+                local entry = reader.Entries[name] or reader.Entries[string.lower(name)]
                 return if entry then Value(entry, kind) else nil
             end
         end
@@ -1609,10 +1611,11 @@ do
                 Budget(#children)
                 local seen = {}
                 local index = 1
-                while index <= #children do
+                while index <= #children and index <= 20000 do
                     local child = children[index]
                     index += 1
                     if not Running() or world.MapAddress ~= mapAddress then break end
+                    if seen[child] then continue end
                     seen[child] = true
                     if known[child] == nil then
                         local name = MemoryName(child)
@@ -1779,7 +1782,7 @@ do
             {Attribute = "Pursuit", Name = "Pursuiting", Kind = "Bool", TrueColor = style.Failing},
         },
         Butcher = {
-            {Attribute = "beartraps", Name = "Bear traps available", Kind = "Number"},
+            {Attribute = "Beartraps", Name = "Bear traps available", Kind = "Number"},
         },
         Killer = {
             {Attribute = "Frenzy", Name = "Killer frenzy", Kind = "Bool", TrueColor = style.Failing},
