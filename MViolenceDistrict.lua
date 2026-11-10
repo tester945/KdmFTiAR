@@ -95,7 +95,7 @@ local attackDefaults = {Windup = 0, Linger = .8, Height = 7}
 local parrySafety = .1
 local localRadius = 1.5
 local localHalfHeight = 2.5
-local parryTuning = {Prediction = .1, Range = 6.9, HumanizeMs = 60, PastTime = .3}
+local parryTuning = {Prediction = .1, Range = 6.9, HumanizeMs = 40, PastTime = .3}
 local parryCooldown = 1
 local parryRangeColor = Color3.fromRGB(255, 255, 255)
 local parryAttackColor = Color3.fromRGB(255, 70, 70)
@@ -2676,7 +2676,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_pumpkin = bPumpkinESP,
         vd_parry_predict = parryTuning.Prediction,
         vd_parry_dist = parryTuning.Range,
-        vd_parry_human = parryTuning.HumanizeMs,
+        vd_parry_humanize = parryTuning.HumanizeMs,
     }
     local apply = {
         vd_gen = function(v) bGeneratorESP = v == true end,
@@ -2700,7 +2700,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         vd_pumpkin = function(v) bPumpkinESP = v == true end,
         vd_parry_predict = function(v) parryTuning.Prediction = math.clamp(tonumber(v) or .1, 0, .5) end,
         vd_parry_dist = function(v) parryTuning.Range = math.clamp(tonumber(v) or 6.9, 2, 15) end,
-        vd_parry_human = function(v) parryTuning.HumanizeMs = math.clamp(tonumber(v) or 60, 0, 200) end,
+        vd_parry_humanize = function(v) parryTuning.HumanizeMs = math.clamp(tonumber(v) or 40, 0, 200) end,
     }
     local colours = {
         vd_gen_col = function(c) generatorColor = c end,
@@ -2809,7 +2809,7 @@ if type(UI) == "table" and type(UI.AddTab) == "function" then
         Picker(parrying, "vd_parry_col", parryRangeColor)
         Widget(parrying, "SliderFloat", "vd_parry_predict", "vd_parry_predict", "Killer prediction (s)", 0, .5, defaults.vd_parry_predict, "%.2f")
         Widget(parrying, "SliderFloat", "vd_parry_dist", "vd_parry_dist", "Range (studs)", 2, 15, defaults.vd_parry_dist, "%.1f")
-        Widget(parrying, "SliderInt", "vd_parry_human", "vd_parry_human", "Humanize (max ms)", 0, 200, defaults.vd_parry_human)
+        Widget(parrying, "SliderInt", "vd_parry_humanize", "vd_parry_humanize", "Humanize (max ms)", 0, 200, defaults.vd_parry_humanize)
 
         local vaulting = Section(tab, "Fast vault", "Right")
         Toggle(vaulting, "vd_vault", "Always fast vault")
