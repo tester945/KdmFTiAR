@@ -1,4 +1,3 @@
-local function Main()
 if game.GameId == 6739698191 then
 
 local generatorColor = Color3.fromRGB(157, 159, 255)
@@ -67,7 +66,7 @@ local function FetchOffsets()
 end
 
 local O = FetchOffsets()
-local visibleOffset = tonumber(O.GuiObject and O.GuiObject.Visible) or 0x575
+local visibleOffset = 0x345
 local activeAnimationsOffset = tonumber(O.Animator and O.Animator.ActiveAnimations)
 local trackAnimationOffset = tonumber(O.AnimationTrack and O.AnimationTrack.Animation)
 local animationIdOffset = tonumber(O.Misc and O.Misc.AnimationId)
@@ -83,7 +82,6 @@ local attackAnimations = {
     ["129626174716003"] = {Name = "Slasher"},
     ["135002183282873"] = {Name = "Cure"},
     ["125430111937587"] = {Name = "Abysswalker"},
-    ["100014992013740"] = {Name = "Abysswalker lunge", Linger = 1.1},
     ["104540716539347"] = {Name = "Killer special"},
     ["93902163029544"] = {Name = "Killer"},
     ["83333467665074"] = {Name = "Butcher"},
@@ -120,9 +118,40 @@ local function Running()
     return _G.MatchaVDRunId == runId
 end
 
-local startJobId = game.JobId
+local guard = {JobId = game.JobId}
+guard.Addresses = {
+    Workspace = workspace.Address,
+    Players = Players.Address,
+    RunService = RunService.Address,
+    LocalPlayer = Players.LocalPlayer and Players.LocalPlayer.Address,
+}
 
-local function ServerChanged()
+function guard.SameServer()
+    local ok, jobId = pcall(function() return game.JobId end)
+    return ok and jobId == guard.JobId
+end
+
+function guard.Problem()
+    if game.JobId ~= guard.JobId then return "JobId changed" end
+    local current = {
+        Workspace = workspace,
+        Players = game:GetService("Players"),
+        RunService = game:GetService("RunService"),
+    }
+    current.LocalPlayer = current.Players and current.Players.LocalPlayer
+    for name, start in guard.Addresses do
+        local object = current[name]
+        local address = object and object.Address
+        if type(address) ~= "number" or address <= 0x10000 or address >= 0x7FFFFFFFFFFF then return name .. " can't be read" end
+        if address ~= start then return name .. " was rebuilt" end
+        local vtable = memory_read("uintptr_t", address)
+        if type(vtable) ~= "number" or vtable <= 0x10000 or vtable >= 0x7FFFFFFFFFFF then return name .. " memory can't be read" end
+    end
+    if not workspace.CurrentCamera then return "workspace.CurrentCamera is missing" end
+    return nil
+end
+
+function guard.Unload(reason)
     _G.MatchaVDRunId = nil
     if _G.MatchaVDConnection then
         pcall(_G.MatchaVDConnection.Disconnect, _G.MatchaVDConnection)
@@ -135,17 +164,7 @@ local function ServerChanged()
     keyrelease(0xA2)
     keyrelease(0x20)
     if type(UI) == "table" and type(UI.RemoveTab) == "function" then pcall(UI.RemoveTab, "Violence District") end
-    print("[MatchaVD] server changed, restarting once the new server has loaded")
-    task.spawn(function()
-        while true do
-            task.wait(.5)
-            if _G.MatchaVDRunId ~= nil then return end
-            local ok, jobId = pcall(function() return game.JobId end)
-            if ok and jobId ~= "" and jobId ~= startJobId and game:IsLoaded() and game:GetService("Players").LocalPlayer then break end
-        end
-        task.wait(1)
-        if _G.MatchaVDRunId == nil then Main() end
-    end)
+    print("[MatchaVD] unloaded: " .. tostring(reason))
 end
 
 local function Valid(pointer)
@@ -192,11 +211,25 @@ local function ResumeJob(job, now)
 end
 
 task.spawn(function()
+    local nextServiceCheck, failures = 0, 0
     while Running() do
-        local jobOk, jobId = pcall(function() return game.JobId end)
-        if not jobOk or jobId ~= startJobId then
-            ServerChanged()
+        if not guard.SameServer() then
+            guard.Unload("teleport detected (JobId changed)")
             return
+        end
+        if tick() >= nextServiceCheck then
+            nextServiceCheck = tick() + .25
+            local ok, problem = pcall(guard.Problem)
+            if not ok then problem = "service check failed: " .. tostring(problem) end
+            if problem then
+                failures += 1
+                if failures >= 2 then
+                    guard.Unload(problem)
+                    return
+                end
+            else
+                failures = 0
+            end
         end
         local started = os.clock()
         local now = tick() + scheduler.Tick / 2
@@ -238,7 +271,9 @@ local function BlockU64(block, offset)
     return buffer.readu32(block, offset) + buffer.readu32(block, offset + 4) * 4294967296
 end
 
-local parry = {History = {}, LastParry = 0, NextRefresh = 0, AnimationIds = {}}
+local parry = {History = {}, LastParry = 0, NextRefresh = 0, AnimationIds = {}, CrouchAnimations = {
+    ["100014992013740"] = {Name = "Abysswalker lunge", Duration = 1.1, Range = 30},
+}}
 local world = {NextRefresh = 0, NextKillerType = 0, KillerType = ""}
 
 local function ReadStdString(address)
@@ -634,6 +669,11 @@ local function UpdateCamera(now)
     end
     local cframe = camera.CFrame
     local position, look, right, up = cframe.Position, cframe.LookVector, cframe.RightVector, cframe.UpVector
+    local px, py, pz = position.X, position.Y, position.Z
+    if px ~= px or py ~= py or pz ~= pz or math.abs(px) > 1e6 or math.abs(py) > 1e6 or math.abs(pz) > 1e6 or math.abs(look.Magnitude - 1) > .01 then
+        frame.Ready = false
+        return
+    end
     frame.PX, frame.PY, frame.PZ = position.X, position.Y, position.Z
     frame.LX, frame.LY, frame.LZ = look.X, look.Y, look.Z
     frame.RX, frame.RY, frame.RZ = right.X, right.Y, right.Z
@@ -645,9 +685,11 @@ local function UpdateCamera(now)
     end
     if not frame.NextFov or now >= frame.NextFov then
         frame.NextFov = now + .05
-        frame.Focal = frame.HalfHeight / math.tan(math.rad(camera.FieldOfView) / 2)
+        local fov = camera.FieldOfView
+        frame.Focal = if fov and fov > 1 and fov < 179 then frame.HalfHeight / math.tan(math.rad(fov) / 2) else nil
     end
-    frame.Ready = true
+    local focal = frame.Focal
+    frame.Ready = focal ~= nil and focal == focal and focal > 0 and focal < 1e5 and frame.HalfWidth >= 1 and frame.HalfHeight >= 1
 end
 
 local lines = {}
@@ -942,8 +984,11 @@ local function ScanKillerTracks(now)
             current[track] = true
             if previous and not previous[track] then
                 local animation = memory_read("uintptr_t", track + trackAnimationOffset)
-                local config = Valid(animation) and attackAnimations[ReadAnimationId(animation)]
+                local id = Valid(animation) and ReadAnimationId(animation)
+                local config = id and attackAnimations[id]
                 if config then StartAttack(config, now) end
+                local crouch = id and parry.CrouchAnimations[id]
+                if crouch then parry.Crouch = {Config = crouch, Ends = now + crouch.Duration} end
             end
         end
         node = memory_read("uintptr_t", node)
@@ -1005,12 +1050,12 @@ local function UpdateParry(now)
         parryTuning.PastTime = math.clamp((tonumber(GetPingValue()) or 0) / 1000, 0, .6)
     end
     if not parry.Killer or parry.Team ~= "Survivors" then
-        parry.Attack, parry.KillerPosition = nil, nil
+        parry.Attack, parry.Crouch, parry.KillerPosition = nil, nil, nil
         return false
     end
     parry.KillerPosition = parry.Killer.Root.Position
     if not parry.KillerPosition then
-        parry.Killer, parry.Attack, parry.NextRefresh = nil, nil, 0
+        parry.Killer, parry.Attack, parry.Crouch, parry.NextRefresh = nil, nil, nil, 0
         return false
     end
     local elapsed = now - (parry.LastKillerTime or 0)
@@ -1034,6 +1079,7 @@ local function UpdateParry(now)
     end
     ScanKillerTracks(now)
     if parry.Attack and now > parry.Attack.Ends then parry.Attack = nil end
+    if parry.Crouch and now > parry.Crouch.Ends then parry.Crouch = nil end
     if bAutoParry and parry.HasDagger then CheckAttack(now) end
     return true
 end
@@ -1522,13 +1568,18 @@ do
                 local children = MemoryChildren(mapAddress) or {}
                 Budget(#children)
                 local seen = {}
-                for _, child in children do
+                local index = 1
+                while index <= #children do
+                    local child = children[index]
+                    index += 1
                     if not Running() or world.MapAddress ~= mapAddress then break end
                     seen[child] = true
                     if known[child] == nil then
                         local name = MemoryName(child)
                         Budget(4)
-                        if name == "BearTrap" then
+                        if string.match(name, "^%d+$") then
+                            known[child] = "Folder"
+                        elseif name == "BearTrap" then
                             local cube = MemoryChildNames(child).Cube
                             local position = cube and MemoryPosition(cube)
                             Budget(20)
@@ -1540,7 +1591,9 @@ do
                             firstSeen[child] = firstSeen[child] or now
                             local names = MemoryChildNames(child)
                             Budget(10)
-                            if names.Humanoid and names.HumanoidRootPart and names.RagdollConstraints then
+                            if names.Humanoid and names.HumanoidRootPart and names.RagdollConstraints and Players:FindFirstChild(name) then
+                                known[child] = false
+                            elseif names.Humanoid and names.HumanoidRootPart and names.RagdollConstraints then
                                 local parts = {}
                                 for _, limb in limbs do parts[limb] = names[limb] end
                                 zombies[child] = {Parts = parts}
@@ -1551,6 +1604,11 @@ do
                         else
                             known[child] = false
                         end
+                    end
+                    if known[child] == "Folder" then
+                        local nested = MemoryChildren(child) or {}
+                        Budget(#nested)
+                        for _, grandchild in nested do children[#children + 1] = grandchild end
                     end
                 end
                 for child in known do
@@ -1589,74 +1647,18 @@ local UpdateAutoCrouch, ReleaseCrouch
 
 do
     local crouchKey = 0xA2
-    local waveSpeed = 70
-    local waveLead = .35
-    local waveHalfWidth = 6
-    local waveHalfDepth = 3.1
-    local waveMargin = 1.5
-    local waveHeight = 6
-    local releaseDelay = .15
-    local waves, names = {}, {}
     local crouching = false
-    local lastThreat = -math.huge
-    local nextScan = 0
 
     ReleaseCrouch = function()
         if crouching then keyrelease(crouchKey) end
         crouching = false
     end
 
-    UpdateAutoCrouch = function(now)
-        local root = world.LocalRoot
-        if not memoryReady or world.KillerType ~= "Abysswalker" or world.LocalTeam ~= "Survivors" or not root then
-            ReleaseCrouch()
-            return
-        end
-        local children = now >= nextScan and MemoryChildren(workspace.Address)
-        if children then
-            nextScan = now + .1
-            local seen = {}
-            for _, address in children do
-                seen[address] = true
-                if names[address] == nil then
-                    names[address] = MemoryName(address)
-                    if names[address] == "Wave" then
-                        local part = MemoryChildNames(address).Part
-                        if part then waves[address] = {Part = part} end
-                    end
-                end
-            end
-            for address in names do
-                if not seen[address] then names[address], waves[address] = nil, nil end
-            end
-        end
-
-        local me = root.Position
-        if not me then
-            ReleaseCrouch()
-            return
-        end
-        for _, wave in waves do
-            local position = MemoryPosition(wave.Part)
-            if position then
-                wave.First = wave.First or position
-                if not wave.Direction then
-                    local moved = Vector3.new(position.X - wave.First.X, 0, position.Z - wave.First.Z)
-                    if moved.Magnitude > 1 then wave.Direction = moved.Unit end
-                end
-                local direction = wave.Direction
-                if direction and math.abs(me.Y - position.Y) <= waveHeight then
-                    local offset = Vector3.new(me.X - position.X, 0, me.Z - position.Z)
-                    local along = offset:Dot(direction)
-                    local lateral = math.abs(offset:Dot(Vector3.new(-direction.Z, 0, direction.X)))
-                    if lateral <= waveHalfWidth + waveMargin and along >= -(waveHalfDepth + waveMargin) and along <= waveSpeed * waveLead + waveHalfDepth then
-                        lastThreat = now
-                    end
-                end
-            end
-        end
-
-        local shouldCrouch = now - lastThreat < releaseDelay
+    UpdateAutoCrouch = function()
+        local crouch = parry.Crouch
+        local killerPosition, localPosition = parry.KillerPosition, parry.LocalPosition
+        local shouldCrouch = crouch ~= nil and killerPosition ~= nil and localPosition ~= nil
+            and (localPosition - killerPosition).Magnitude <= crouch.Config.Range
         if shouldCrouch and not crouching then
             keypress(crouchKey)
             crouching = true
@@ -2190,10 +2192,56 @@ end)
 
 AddJob("Skill check", true, function()
     local player = game:GetService("Players").LocalPlayer
-    local guiRotationOffset = visibleOffset - 0x19
+    local version = tostring(getrbxversion())
+    local saved = _G.MatchaVDSkillLayout
+    local layout = saved and saved.Version == version and saved or nil
+    if not layout and version == "version-4ea8e85481e34f46" then layout = {Visible = 0x345, Rotation = 0x32C} end
+    local visibleOffsetUsed = layout and layout.Visible
+    local guiRotationOffset = layout and layout.Rotation
+    local candidates = {}
+    do
+        local added = {}
+        for _, visible in {visibleOffset, tonumber(O.GuiObject and O.GuiObject.Visible) or visibleOffset, 0x575, 0x595} do
+            if not added[visible] then
+                added[visible] = true
+                candidates[#candidates + 1] = {Visible = visible, Rotation = visible - 0x19, Rises = 0}
+                candidates[#candidates + 1] = {Visible = visible, Rotation = 0xD0, Rises = 0}
+            end
+        end
+    end
     local check, line, goal, trapPerfect
     local nextFind = 0
     local pressed, lastNeedle, lastGoal, step, movedAt, seenNeedle = false, 0, 0, 0, 0, nil
+
+    local function Angle(value)
+        return value % 360
+    end
+
+    local function DetectLayout()
+        local anyVisible = false
+        for _, candidate in candidates do
+            if memory_read("byte", check.Address + candidate.Visible) == 1 then
+                anyVisible = true
+                local needle = memory_read("float", line.Address + candidate.Rotation)
+                local rise = candidate.Last and needle and Angle(needle - candidate.Last)
+                if rise and rise >= .2 and rise <= 40 then
+                    candidate.Rises += 1
+                else
+                    candidate.Rises = 0
+                end
+                candidate.Last = needle
+                if candidate.Rises >= 3 then
+                    visibleOffsetUsed, guiRotationOffset = candidate.Visible, candidate.Rotation
+                    _G.MatchaVDSkillLayout = {Version = version, Visible = visibleOffsetUsed, Rotation = guiRotationOffset}
+                    print(string.format("[MatchaVD] skill check offsets: visible 0x%X, rotation 0x%X", visibleOffsetUsed, guiRotationOffset))
+                    return true
+                end
+            else
+                candidate.Rises, candidate.Last = 0, nil
+            end
+        end
+        return anyVisible
+    end
 
     local function Find()
         local gui = player:FindFirstChild("PlayerGui")
@@ -2206,8 +2254,8 @@ AddJob("Skill check", true, function()
 
     local function ZoneStart()
         local goalRotation = memory_read("float", goal.Address + guiRotationOffset)
-        if memory_read("byte", goal.Address + visibleOffset) == 1 or math.abs(goalRotation) >= 1 then return goalRotation end
-        if trapPerfect and memory_read("byte", trapPerfect.Address + visibleOffset) == 1 then
+        if memory_read("byte", goal.Address + visibleOffsetUsed) == 1 or math.abs(goalRotation) >= 1 then return goalRotation end
+        if trapPerfect and memory_read("byte", trapPerfect.Address + visibleOffsetUsed) == 1 then
             return memory_read("float", trapPerfect.Address + guiRotationOffset)
         end
         return nil
@@ -2223,18 +2271,26 @@ AddJob("Skill check", true, function()
                 nextFind = now + 1
                 Find()
             end
-            if check and line and goal then
+            if check and line and goal and not guiRotationOffset then
+                if DetectLayout() then
+                    stats.Skill += 1
+                    Sleep(1 / 60)
+                    continue
+                end
+            elseif check and line and goal then
                 local needle = memory_read("float", line.Address + guiRotationOffset)
                 if needle ~= seenNeedle then seenNeedle, movedAt = needle, now end
-                if memory_read("byte", check.Address + visibleOffset) == 1 and now - movedAt <= 1.5 then
+                if memory_read("byte", check.Address + visibleOffsetUsed) == 1 and now - movedAt <= 1.5 then
                     local zone = ZoneStart()
-                    if needle < lastNeedle - 30 or (zone and math.abs(zone - lastGoal) > 1) then
+                    local delta = Angle(needle - lastNeedle)
+                    if lastNeedle == 0 or (delta > 40 and delta < 330) or (zone and math.abs(Angle(zone - lastGoal + 180) - 180) > 1) then
                         pressed, step = false, 0
-                    elseif needle > lastNeedle then
-                        step = needle - lastNeedle
+                    elseif delta > 0 and delta <= 40 then
+                        step = delta
                     end
                     lastNeedle, lastGoal = needle, zone or lastGoal
-                    if zone and not pressed and step > 0 and needle + step / 2 >= zone + skillCheckAngle and needle <= zone + 114 then
+                    local diff = zone and Angle(needle - zone)
+                    if zone and not pressed and step > 0 and diff + step / 2 >= skillCheckAngle and diff <= 114 then
                         pressed = true
                         keypress(0x20)
                         task.spawn(function()
@@ -2258,8 +2314,8 @@ AddJob("Parry", true, function()
         return
     end
     while Running() do
-        if not (bAutoParry or bShowParryRange) or not isrbxactive() then
-            parry.Attack, parry.KillerPosition, parry.Killer, parry.LocalRoot, parry.NextRefresh = nil, nil, nil, nil, 0
+        if not (bAutoParry or bShowParryRange or bAutoCrouch) or not isrbxactive() then
+            parry.Attack, parry.Crouch, parry.KillerPosition, parry.Killer, parry.LocalRoot, parry.NextRefresh = nil, nil, nil, nil, nil, 0
             table.clear(parry.History)
             Sleep(.5)
         elseif UpdateParry(tick()) then
@@ -2362,6 +2418,7 @@ do
     end
 
     local function Apply(entries, values)
+        if not guard.SameServer() then return false end
         local ok, err = pcall(applygc, entries, values)
         if not ok then
             print("[MatchaVD] fast vault: applygc failed: " .. tostring(err))
@@ -2524,7 +2581,7 @@ do
         local disabled = false
 
         local function Restore()
-            if disabled and humanoid then memory_write("byte", humanoid + autoRotateOffset, 1) end
+            if disabled and humanoid and guard.SameServer() then memory_write("byte", humanoid + autoRotateOffset, 1) end
             disabled = false
         end
 
@@ -2541,7 +2598,7 @@ do
                     humanoid, root = found and found.Address, rootPart and rootPart.Address
                 end
             end
-            if bMoonwalk and humanoid and isrbxactive() and iskeypressed(keyS) then
+            if bMoonwalk and humanoid and isrbxactive() and iskeypressed(keyS) and guard.SameServer() then
                 if memory_read("byte", humanoid + autoRotateOffset) == 1 then
                     memory_write("byte", humanoid + autoRotateOffset, 0)
                 end
@@ -2771,6 +2828,3 @@ print("[MatchaVD] loaded")
 else
     print("Not in Violence District")
 end
-end
-
-Main()
