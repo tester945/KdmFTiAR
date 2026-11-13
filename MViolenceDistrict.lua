@@ -113,6 +113,7 @@ _G.MatchaVDDrawings = allDrawings
 local frame = {}
 local stats = {Loops = 0, LoopTime = 0, Renders = 0, RenderTime = 0, Writes = 0, Lines = 0, Next = 0, Skill = 0, Scans = 0, ScanTime = 0, ScanMax = 0}
 local windows = {}
+local windowPaths = {Parents = {}}
 
 local function Running()
     return _G.MatchaVDRunId == runId
@@ -677,6 +678,14 @@ local function ScanWindows(map)
             if not pose then
                 local bottom = object:FindFirstChild("Bottom")
                 pose = bottom and PartPose(bottom)
+                if pose then
+                    local names, node = {}, object.Parent
+                    while node and node.Address ~= map.Address do
+                        table.insert(names, 1, node.Name)
+                        node = node.Parent
+                    end
+                    windowPaths.Parents[address] = if node then names else nil
+                end
             end
             if pose then found[address] = pose end
         end
@@ -685,6 +694,73 @@ local function ScanWindows(map)
     local count = 0
     for _ in found do count += 1 end
     return count
+end
+
+local function SaveWindowPaths()
+    local unique, paths = {}, {}
+    for address in windows do
+        local names = windowPaths.Parents[address]
+        if not names then return end
+        local key = table.concat(names, "/")
+        if not unique[key] then
+            unique[key] = true
+            paths[#paths + 1] = names
+        end
+    end
+    local count = 0
+    for _ in windows do count += 1 end
+    windowPaths.Saved = {Paths = paths, Count = count}
+end
+
+local function RestoreWindows(map)
+    local saved = windowPaths.Saved
+    if not saved then return false end
+    local children = {}
+    local function Children(node)
+        local address = node.Address
+        local list = children[address]
+        if not list then
+            list = node:GetChildren()
+            children[address] = list
+        end
+        return list
+    end
+    local found, parents = {}, {}
+    for _, names in saved.Paths do
+        local nodes = {map}
+        for _, name in names do
+            local nextNodes = {}
+            for _, node in nodes do
+                for _, child in Children(node) do
+                    if child.Name == name then nextNodes[#nextNodes + 1] = child end
+                end
+            end
+            nodes = nextNodes
+        end
+        for _, node in nodes do
+            for _, child in Children(node) do
+                if child.Name == "Window" then
+                    local address = child.Address
+                    if not found[address] then
+                        local bottom = child:FindFirstChild("Bottom")
+                        local pose = bottom and PartPose(bottom)
+                        if pose then
+                            found[address] = pose
+                            parents[address] = names
+                        end
+                    end
+                end
+            end
+        end
+        Yield()
+        if not Running() then return false end
+    end
+    local count = 0
+    for _ in found do count += 1 end
+    if count ~= saved.Count then return false end
+    windows = found
+    windowPaths.Parents = parents
+    return true
 end
 
 local function UpdateCamera(now)
@@ -2215,8 +2291,11 @@ AddJob("Main", false, function()
     local map, mapAddress, generatorFolder
     local nextMapCheck, nextWindowScan = 0, 0
     local windowCount, stableScans = -1, 0
+    local restorePending = false
     local function RestartWindows(now)
         windows, nextWindowScan, windowCount, stableScans = {}, now + 2, -1, 0
+        windowPaths.Parents = {}
+        restorePending = windowPaths.Saved ~= nil
     end
     for _, tracker in trackers do ResetTracker(tracker) end
     local paused = false
@@ -2268,10 +2347,19 @@ AddJob("Main", false, function()
             if bZombieESP then UpdateZombiePositions() end
             if bPumpkinESP then UpdatePumpkins(map, tick()) end
             if bInfoHud then UpdateInfoHud(tick()) end
+            if bWindowESP and map and restorePending then
+                restorePending = false
+                if RestoreWindows(map) then
+                    stableScans = windowStableScans
+                else
+                    windows, windowPaths.Parents = {}, {}
+                end
+            end
             if bWindowESP and map and stableScans < windowStableScans and tick() >= nextWindowScan then
                 local count = ScanWindows(map)
                 if count and count >= minimumWindows and count == windowCount then
                     stableScans += 1
+                    if stableScans >= windowStableScans then SaveWindowPaths() end
                 else
                     stableScans = 0
                 end
