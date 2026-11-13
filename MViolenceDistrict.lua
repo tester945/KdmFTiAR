@@ -1778,7 +1778,7 @@ do
         Padding = 6,
         GripSize = 10,
         MinWidth = 140,
-        MaxLines = 24,
+        MaxLines = 32,
         Background = Color3.fromRGB(20, 20, 24),
         Bar = Color3.fromRGB(45, 45, 55),
         TextColor = Color3.fromRGB(235, 235, 235),
@@ -1823,7 +1823,7 @@ do
         {Attribute = "speedboost", Name = "Speed multiplier", Kind = "Number", Prefix = "x", Decimals = 2, NormalValue = 1, Missing = 1, ChangedColor = style.Working},
     }
 
-    local hud = {X = 40, Y = 200, Width = 230, Lines = {}, NextGenerators = 0, NextKiller = 0, NextRead = 0, Values = {}, Shown = {}, ReadIndex = 0, WasDown = false}
+    local hud = {X = 40, Y = 200, Width = 230, Lines = {}, NextGenerators = 0, NextKiller = 0, NextRead = 0, NextPerks = 0, Perks = {}, Values = {}, Shown = {}, ReadIndex = 0, WasDown = false}
     if isfile(style.File) then
         local x, y, w = string.match(readfile(style.File), "(%-?%d+) (%-?%d+) (%d+)")
         if x then hud.X, hud.Y, hud.Width = tonumber(x), tonumber(y), math.max(tonumber(w), style.MinWidth) end
@@ -1919,6 +1919,10 @@ do
                 local text, color = FormatValue(shown, hud.Values[shown.Attribute])
                 lines[#lines + 1] = {Text = shown.Name .. ": " .. text, Color = color}
             end
+            lines[#lines + 1] = {Gap = true}
+            lines[#lines + 1] = {Text = "Perks", Color = style.Heading}
+            for _, perk in hud.Perks do lines[#lines + 1] = {Text = perk, Color = style.TextColor} end
+            if #hud.Perks == 0 then lines[#lines + 1] = {Text = "none found", Color = style.TextColor} end
         end
         hud.Lines = lines
     end
@@ -1966,8 +1970,27 @@ do
         end
     end
 
+    local function ReadPerks(now)
+        local killer = world.KillerCharacter
+        if killer ~= hud.PerkKiller then
+            hud.PerkKiller, hud.Perks, hud.NextPerks = killer, {}, 0
+        end
+        if not killer or now < hud.NextPerks then return end
+        hud.NextPerks = now + 5
+        local perks = {}
+        for _, child in killer:GetChildren() do
+            if child.ClassName == "Script" then
+                local name = string.match(child.Name, "^(.-)%s+%d+$")
+                if name and name ~= "" then perks[#perks + 1] = child.Name end
+            end
+        end
+        table.sort(perks)
+        hud.Perks = perks
+    end
+
     UpdateInfoHud = function(now)
         HandleMouse()
+        ReadPerks(now)
         if now >= hud.NextRead then
             hud.NextRead = now + .06
             ReadNextAttribute()
