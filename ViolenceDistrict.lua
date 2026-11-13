@@ -422,38 +422,58 @@ end
 
 local function ScanGenerators()
     local map = workspace:FindFirstChild("Map")
+    local containers = {}
     local gens = FindMapFolder(map, generatorFolders, "Generator")
-    if not gens then
+    if gens then containers[1] = gens end
+    local tiles = map and map:FindFirstChild("Tiles")
+    if tiles then
+        for _, tile in tiles:GetChildren() do
+            if tile:FindFirstChild("Generator") then containers[#containers + 1] = tile end
+        end
+    end
+    local main = map and map:FindFirstChild("main")
+    if main and main:FindFirstChild("Generator") then containers[#containers + 1] = main end
+    if #containers == 0 then
         ClearGenerators()
         return
     end
 
-    local address = tonumber(gens.Data)
+    local address = tonumber(containers[1].Data)
     if address ~= gensAddress then
         generators = {}
         gensAddress = address
     end
 
-    local raw = RawChildren(address)
-    if not raw then return end
+    local raw = {}
+    local live = {}
+    for _, container in containers do
+        local children = RawChildren(tonumber(container.Data))
+        if children then
+            live[#live + 1] = container
+            for child in children do raw[child] = container end
+        end
+    end
     for id, entry in generators do
         if not raw[entry.Address] then generators[id] = nil end
     end
 
-    for _, generator in gens:GetChildren() do
-        local generatorAddress = tonumber(generator.Data)
-        local id = tostring(generatorAddress)
-        if generatorAddress and raw[generatorAddress] and not generators[id] then
-            local pose = PartPose(generator:FindFirstChild("GeneratorBody"))
-            if pose then
-                generators[id] = {
-                    Address = generatorAddress,
-                    Pose = pose,
-                    Progress = -1,
-                    Completed = false,
-                    Text = "",
-                    NextNodeTry = 0,
-                }
+    for _, container in live do
+        for _, generator in container:GetChildren() do
+            if container ~= gens and generator.Name ~= "Generator" then continue end
+            local generatorAddress = tonumber(generator.Data)
+            local id = tostring(generatorAddress)
+            if generatorAddress and raw[generatorAddress] and not generators[id] then
+                local pose = PartPose(generator:FindFirstChild("GeneratorBody"))
+                if pose then
+                    generators[id] = {
+                        Address = generatorAddress,
+                        Pose = pose,
+                        Progress = -1,
+                        Completed = false,
+                        Text = "",
+                        NextNodeTry = 0,
+                    }
+                end
             end
         end
     end
@@ -1469,52 +1489,160 @@ do
     local windowCheckInterval = .5
     local fullScanInterval = 2
     local scanYieldEvery = 500
+    local minimumWindows = 3
     local windows = {}
-    local mapAddress
+    local parents = {}
+    local saved
+    local mapAddress, gensKey
     local nextFullScan = 0
     local nextCheck = 0
+    local lastUpdate = 0
+    local scanState = {Generation = 0, LastCount = -1, Done = false, Busy = false, BusySince = 0, Restore = false}
 
-    ClearWindows = function()
-        windows, mapAddress, nextFullScan = {}, nil, 0
+    local function Restart(now)
+        windows, parents = {}, {}
+        scanState.Generation += 1
+        scanState.LastCount, scanState.Done, scanState.Busy = -1, false, false
+        scanState.Restore = saved ~= nil
+        nextFullScan = now + fullScanInterval
     end
 
-    local function FullScan(map, address)
-        local found = {}
+    ClearWindows = function()
+        windows, parents, mapAddress, gensKey, nextFullScan = {}, {}, nil, nil, 0
+        scanState.Generation += 1
+        scanState.LastCount, scanState.Done, scanState.Busy, scanState.Restore = -1, false, false, false
+    end
+
+    local function ParentPath(window, mapId)
+        local names, node = {}, window.Parent
+        while node and tonumber(node.Data) ~= mapId do
+            table.insert(names, 1, node.Name)
+            node = node.Parent
+        end
+        return if node then names else nil
+    end
+
+    local function SavePaths(count)
+        local unique, paths = {}, {}
+        for address in windows do
+            local names = parents[address]
+            if not names then return end
+            local key = table.concat(names, "/")
+            if not unique[key] then
+                unique[key] = true
+                paths[#paths + 1] = names
+            end
+        end
+        saved = {Paths = paths, Count = count}
+    end
+
+    local function FullScan(map, address, generation)
+        local mapId = tonumber(map.Data)
+        local found, foundParents = {}, {}
         local count = 0
         for index, descendant in map:GetDescendants() do
             if descendant.Name == "Window" then
+                local id = tonumber(descendant.Data)
                 local pose = PartPose(descendant:FindFirstChild("Bottom"))
                 if pose then
-                    found[tonumber(descendant.Data)] = pose
+                    found[id] = pose
+                    foundParents[id] = parents[id] or ParentPath(descendant, mapId)
                     count += 1
                 end
             end
             if index % scanYieldEvery == 0 then
                 task.wait()
-                if mapAddress ~= address then return end
+                if scanState.Generation ~= generation then return end
             end
         end
-        if mapAddress ~= address then return end
+        if scanState.Generation ~= generation then return end
+        scanState.Busy = false
         local before = 0
         for _ in windows do before += 1 end
-        windows = found
+        windows, parents = found, foundParents
         if count ~= before then print(string.format("[windows] %d found", count)) end
+        if count >= minimumWindows and count == scanState.LastCount then
+            scanState.Done = true
+            SavePaths(count)
+            print(string.format("[windows] %d windows, scanning stopped", count))
+        end
+        scanState.LastCount = count
+    end
+
+    local function Restore(map, generation)
+        local mapId = tonumber(map.Data)
+        local children = {}
+        local function Children(node)
+            local id = tonumber(node.Data)
+            local list = children[id]
+            if not list then
+                list = node:GetChildren()
+                children[id] = list
+            end
+            return list
+        end
+        local found, foundParents = {}, {}
+        local count = 0
+        for _, names in saved.Paths do
+            local nodes = {map}
+            for _, name in names do
+                local nextNodes = {}
+                for _, node in nodes do
+                    for _, child in Children(node) do
+                        if child.Name == name then nextNodes[#nextNodes + 1] = child end
+                    end
+                end
+                nodes = nextNodes
+            end
+            for _, node in nodes do
+                for _, child in Children(node) do
+                    local id = tonumber(child.Data)
+                    if child.Name == "Window" and not found[id] then
+                        local pose = PartPose(child:FindFirstChild("Bottom"))
+                        if pose then
+                            found[id], foundParents[id] = pose, names
+                            count += 1
+                        end
+                    end
+                end
+            end
+            task.wait()
+            if scanState.Generation ~= generation then return end
+        end
+        if scanState.Generation ~= generation or tonumber(map.Data) ~= mapId then return end
+        scanState.Busy = false
+        if count ~= saved.Count then return end
+        windows, parents = found, foundParents
+        scanState.Done = true
+        print(string.format("[windows] %d windows restored from saved paths", count))
     end
 
     UpdateWindows = function(now)
         for _, pose in windows do MarkInFront(pose) end
+        if now - lastUpdate > 1 then
+            lastUpdate = now
+            Restart(now)
+        end
+        lastUpdate = now
         if now < nextCheck then return end
         nextCheck = now + windowCheckInterval
 
         local map = workspace:FindFirstChild("Map")
         local address = map and tonumber(map.Data)
-        if address ~= mapAddress then
-            ClearWindows()
-            mapAddress, nextFullScan = address, now + fullScanInterval
+        if address ~= mapAddress or gensAddress ~= gensKey then
+            mapAddress, gensKey = address, gensAddress
+            Restart(now)
         end
-        if address and now >= nextFullScan then
+        if scanState.Busy and now - scanState.BusySince > 10 then Restart(now) end
+        if not address or scanState.Done or scanState.Busy then return end
+        scanState.BusySince = now
+        if scanState.Restore then
+            scanState.Restore, scanState.Busy = false, true
+            task.spawn(Restore, map, scanState.Generation)
+        elseif now >= nextFullScan then
             nextFullScan = now + fullScanInterval
-            task.spawn(FullScan, map, address)
+            scanState.Busy = true
+            task.spawn(FullScan, map, address, scanState.Generation)
         end
     end
 
@@ -1848,6 +1976,19 @@ do
         local address = ok and className == "RBX::ModelInstance" and tonumber(character.Data) or nil
         if address ~= killerAddress then
             killerAddress, killerNode, nextNodeTry = address, nil, 0
+            style.Perks, style.NextPerks = {}, 0
+        end
+        if killerAddress and now >= (style.NextPerks or 0) then
+            style.NextPerks = now + 5
+            local perks = {}
+            for _, child in character:GetChildren() do
+                if child.ClassName == "Script" then
+                    local name = string.match(child.Name, "^(.-)%s+%d+$")
+                    if name and name ~= "" then perks[#perks + 1] = child.Name end
+                end
+            end
+            table.sort(perks)
+            style.Perks = perks
         end
         if killerAddress and not killerNode and now >= nextNodeTry then
             nextNodeTry = now + nodeRetryInterval
@@ -1961,8 +2102,9 @@ do
     end
 
     RenderInfoHud = function()
-        local lineCount = 2 + math.max(#generatorLines, 1) + (if killerAddress then #attributeLines else 1)
-        size = vector.create(size.X, style.TitleHeight + 8 + lineCount * style.LineHeight + style.Padding, 0)
+        local perks = style.Perks or {}
+        local lineCount = 2 + math.max(#generatorLines, 1) + (if killerAddress then #attributeLines + 1 + math.max(#perks, 1) else 1)
+        size = vector.create(size.X, style.TitleHeight + 8 + (if killerAddress then 4 else 0) + lineCount * style.LineHeight + style.Padding, 0)
         DrawingImmediate.FilledRectangle(position, size, style.Background, .85, 4)
         DrawingImmediate.FilledRectangle(position, vector.create(size.X, style.TitleHeight, 0), style.Bar, 1, 4)
         DrawingImmediate.OutlinedText(position + vector.create(style.Padding, 2, 0), style.TextSize, style.TextColor, 1, "Info", false, "Nunito")
@@ -1995,6 +2137,13 @@ do
         end
         for _, line in attributeLines do
             if not Line(line.Text, line.Color, 0) then return end
+        end
+
+        y += 4
+        if not Line("Perks", style.Heading, 0) then return end
+        if #perks == 0 then Line("none found", style.TextColor, 0) end
+        for _, perk in perks do
+            if not Line(perk, style.TextColor, 0) then return end
         end
     end
 end
