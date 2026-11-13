@@ -2033,6 +2033,62 @@ do
         memory.set_write_strength(previous)
     end
 
+    moonwalk.Mode, moonwalk.Key = "Blatant", "XButton1"
+
+    moonwalk.KeyHeld = function()
+        if not isrbxactive() or moonwalk.Listening or not moonwalk.Key then return false end
+        for _, key in getpressedkeys() do
+            if key == moonwalk.Key then return true end
+        end
+        return false
+    end
+
+    moonwalk.Listen = function()
+        local ignored = {}
+        for _, key in getpressedkeys() do ignored[key] = true end
+        moonwalk.Listening = ignored
+    end
+
+    local function PollListen()
+        local ignored = moonwalk.Listening
+        local pressed = {}
+        for _, key in getpressedkeys() do
+            pressed[key] = true
+            if not ignored[key] and not string.find(key, "Mouse") then
+                moonwalk.Listening = nil
+                window:set("MoonwalkBind", if key == "Escape" then "None" else key)
+                return
+            end
+        end
+        for key in ignored do
+            if not pressed[key] then ignored[key] = nil end
+        end
+    end
+
+    task.spawn(function()
+        local keys, side = {0x41, 0x44}, 1
+        while _G.ViolenceDistrictRunId == runId do
+            if moonwalk.Listening then PollListen() end
+            if moonwalk.Enabled and moonwalk.Mode == "Legit" and moonwalk.KeyHeld() then
+                local key = keys[side]
+                side = 3 - side
+                local finish = os.clock() + .055
+                keypress(key)
+                moonwalk.LegitHeld = key
+                while os.clock() < finish - .017 do task.wait() end
+                while os.clock() < finish do end
+                keyrelease(key)
+                moonwalk.LegitHeld = nil
+                local resume = os.clock() + .005
+                while os.clock() < resume do end
+            else
+                task.wait()
+            end
+        end
+        if moonwalk.LegitHeld then keyrelease(moonwalk.LegitHeld) end
+        moonwalk.LegitHeld = nil
+    end)
+
     moonwalk.Release = function()
         if state.Disabled and state.Humanoid then Write(memory.writeu8, state.Humanoid, autoRotateOffset, 1) end
         state.Disabled = false
@@ -2055,7 +2111,7 @@ do
             end
         end
         local holdingS = false
-        if moonwalk.Enabled and state.Humanoid then
+        if moonwalk.Enabled and moonwalk.Mode == "Blatant" and state.Humanoid then
             for _, key in getpressedkeys() do
                 if key == "S" then holdingS = true end
             end
@@ -2207,11 +2263,35 @@ do
         if not val then ReleaseCrouch() end
     end
 
-    mainSection:toggle({Name = "Moonwalk (hold S)", Flag = "Moonwalk", Default = false})
+    mainSection:toggle({Name = "Moonwalk", Flag = "Moonwalk", Default = false})
     FlagSetters.Moonwalk = function(val)
         moonwalk.Enabled = val
         if not val then moonwalk.Release() end
     end
+
+    mainSection:dropdown({Name = "Moonwalk mode", Flag = "MoonwalkMode", Values = {"Blatant", "Legit"}, Default = "Blatant"})
+    FlagSetters.MoonwalkMode = function(val)
+        moonwalk.Mode = val
+        if val ~= "Blatant" then moonwalk.Release() end
+    end
+
+    local function LegitMode()
+        return window:get("MoonwalkMode") == "Legit"
+    end
+
+    window:flag("MoonwalkBind", "XButton1", true)
+    FlagSetters.MoonwalkBind = function(val)
+        moonwalk.Key = if val and val ~= "None" then val else nil
+    end
+
+    mainSection:label({Show = LegitMode, Label = function()
+        if moonwalk.Listening then return "Moonwalk bind: press a key..." end
+        return "Moonwalk bind: " .. (moonwalk.Key or "None")
+    end})
+
+    mainSection:button({Name = "Set moonwalk bind", Show = LegitMode, Callback = function()
+        moonwalk.Listen()
+    end})
 
     local parrySection = mainTab:section("React parry")
 
