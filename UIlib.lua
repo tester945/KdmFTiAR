@@ -288,7 +288,10 @@ function Section:label(options)
     return AddControl(self, "label", options)
 end
 
+local deadEntry = {Object = {}, Cache = {}}
+
 function Window:Draw(kind)
+    if not self.Alive then return deadEntry end
     local used = self.Used[kind] + 1
     self.Used[kind] = used
     local pool = self.Pools[kind]
