@@ -45,7 +45,7 @@ local palletPollInterval = .125
 local loopInterval = 1 / 60
 local bDebugStats = false
 local vault = {Enabled = false}
-local bMoonwalk = false
+local moonwalk = {Enabled = false, Mode = "Blatant", DefaultKey = 0x05}
 local bPumpkinESP = false
 local pumpkinColor = Color3.fromRGB(255, 165, 40)
 
@@ -163,7 +163,7 @@ function guard.Unload(reason)
     _G.MatchaVDDrawings = nil
     keyrelease(0xA2)
     keyrelease(0x20)
-    if type(UI) == "table" and type(UI.RemoveTab) == "function" then pcall(UI.RemoveTab, "Violence District") end
+    if moonwalk.Window then moonwalk.Window:destroy() end
     print("[MatchaVD] unloaded: " .. tostring(reason))
 end
 
@@ -503,7 +503,7 @@ local function ReadPallet(pallet)
 end
 
 local trackers = {
-    Generators = {Names = generatorFolders, Child = "Generator", Read = ReadGenerator, Entries = {}},
+    Generators = {Names = generatorFolders, Child = "Generator", Read = ReadGenerator, Entries = {}, Extra = "Tiles"},
     Pallets = {Names = palletFolders, Child = "Newpallet", Read = ReadPallet, Entries = {}},
 }
 
@@ -520,7 +520,7 @@ local function FindFolder(map, tracker)
             if not Running() then return end
             local found = parent:FindFirstChild(name)
             if found and found:FindFirstChild(tracker.Child) then
-                tracker.Folder, tracker.Parent, tracker.Name, tracker.Address = found, parent, name, found.Address
+                tracker.Folder, tracker.Parent, tracker.Name, tracker.Address, tracker.Map = found, parent, name, found.Address, map
                 return
             end
         end
@@ -530,7 +530,24 @@ end
 local function ReadEntries(tracker)
     local complete = true
     local found = {}
-    for index, child in tracker.Folder:GetChildren() do
+    local children = tracker.Folder:GetChildren()
+    local tiles = tracker.Extra and tracker.Map and tracker.Map:FindFirstChild(tracker.Extra)
+    if tiles then
+        for _, tile in tiles:GetChildren() do
+            Yield()
+            for _, child in tile:GetChildren() do
+                if child.Name == tracker.Child then children[#children + 1] = child end
+            end
+        end
+    end
+    local main = tracker.Extra and tracker.Map and tracker.Map:FindFirstChild("main")
+    if main and main ~= tracker.Folder then
+        Yield()
+        for _, child in main:GetChildren() do
+            if child.Name == tracker.Child then children[#children + 1] = child end
+        end
+    end
+    for index, child in children do
         if index % 16 == 0 then Yield() end
         local address = child.Address
         local entry = tracker.Entries[address] or tracker.Read(child)
@@ -2566,29 +2583,34 @@ do
         local startupUntil = tick() + 3
         local retryAt
         local autoFailures = 0
+        local wasEnabled = vault.Enabled
         while Running() do
+            local justEnabled = vault.Enabled and not wasEnabled
+            wasEnabled = vault.Enabled
             if not entries and not vault.Scanning then
                 local now = tick()
-                if startupUntil and now <= startupUntil then
-                    if vault.Enabled and world.LocalTeam == "Survivors" and world.LocalRoot then
+                if startupUntil and now > startupUntil then startupUntil = nil end
+                if vault.Enabled then
+                    if (startupUntil or justEnabled) and world.LocalTeam == "Survivors" and world.LocalRoot then
                         startupUntil = nil
+                        autoFailures = 0
+                        requested = "Auto"
+                    end
+                    WatchLoadingScreen(now)
+                    if loading.ScanAt and now >= loading.ScanAt then
+                        loading.ScanAt = nil
+                        autoFailures = 0
+                        requested = "Auto"
+                    end
+                    if retryAt and now >= retryAt then
+                        retryAt = nil
                         requested = "Auto"
                     end
                 else
-                    startupUntil = nil
-                end
-                WatchLoadingScreen(now)
-                if loading.ScanAt and now >= loading.ScanAt then
-                    loading.ScanAt = nil
-                    autoFailures = 0
-                    requested = "Auto"
-                end
-                if retryAt and now >= retryAt then
-                    retryAt = nil
-                    requested = "Auto"
+                    loading.ScanAt, retryAt = nil, nil
                 end
             end
-            if requested == "Auto" and world.LocalTeam ~= "Survivors" then
+            if requested == "Auto" and (world.LocalTeam ~= "Survivors" or not vault.Enabled) then
                 requested, retryAt = false, nil
             end
             if requested then
@@ -2660,7 +2682,7 @@ do
                     humanoid, root = found and found.Address, rootPart and rootPart.Address
                 end
             end
-            if bMoonwalk and humanoid and isrbxactive() and iskeypressed(keyS) and guard.SameServer() then
+            if moonwalk.Enabled and moonwalk.Mode == "Blatant" and humanoid and isrbxactive() and iskeypressed(keyS) and guard.SameServer() then
                 if memory_read("byte", humanoid + autoRotateOffset) == 1 then
                     memory_write("byte", humanoid + autoRotateOffset, 0)
                 end
@@ -2669,216 +2691,127 @@ do
                 Sleep(1 / 60)
             else
                 Restore()
-                Sleep(if bMoonwalk then 1 / 60 else .25)
+                Sleep(if moonwalk.Enabled then 1 / 60 else .25)
             end
         end
         Restore()
     end)
+
+    moonwalk.KeyHeld = function()
+        local key = if moonwalk.Window then moonwalk.Window:get("vd_moonwalk_kb") else moonwalk.DefaultKey
+        if not key or key == 0 or (moonwalk.Window and moonwalk.Window.Listening) then return false end
+        return isrbxactive() and iskeypressed(key)
+    end
+
+    task.spawn(function()
+        local keys, side, held = {0x41, 0x44}, 1, nil
+        while Running() do
+            if moonwalk.Enabled and moonwalk.Mode == "Legit" and moonwalk.KeyHeld() and guard.SameServer() then
+                local key = keys[side]
+                side = 3 - side
+                local finish = os.clock() + .055
+                keypress(key)
+                held = key
+                task.wait(.035)
+                while os.clock() < finish do end
+                keyrelease(key)
+                held = nil
+                local resume = os.clock() + .005
+                while os.clock() < resume do end
+            else
+                task.wait(1 / 60)
+            end
+        end
+        if held then keyrelease(held) end
+    end)
 end
 
-if type(UI) == "table" and type(UI.AddTab) == "function" then
-    local tabName = "Violence District"
-    local defaults = {
-        vd_gen = bGeneratorESP,
-        vd_kicked = bKickedColor,
-        vd_pal = bPalletESP,
-        vd_win = bWindowESP,
-        vd_trap = bTrapESP,
-        vd_zombie = bZombieESP,
-        vd_dagger = bDaggerTrajectory,
-        vd_hud = bInfoHud,
-        vd_hl_dist = highlightDistance,
-        vd_hl_fill = bHighlightFill,
-        vd_hl_outline = bHighlightOutline,
-        vd_skill = bAutoSkillCheck,
-        vd_parry = bAutoParry,
-        vd_parry_range = bShowParryRange,
-        vd_auto_pallet = bAutoPallet,
-        vd_crouch = bAutoCrouch,
-        vd_vault = vault.Enabled,
-        vd_moonwalk = bMoonwalk,
-        vd_pumpkin = bPumpkinESP,
-        vd_parry_predict = parryTuning.Prediction,
-        vd_parry_dist = parryTuning.Range,
-        vd_parry_humanize = parryTuning.HumanizeMs,
-    }
-    local apply = {
-        vd_gen = function(v) bGeneratorESP = v == true end,
-        vd_kicked = function(v) bKickedColor = v == true end,
-        vd_pal = function(v) bPalletESP = v == true end,
-        vd_win = function(v) bWindowESP = v == true end,
-        vd_trap = function(v) bTrapESP = v == true end,
-        vd_zombie = function(v) bZombieESP = v == true end,
-        vd_dagger = function(v) bDaggerTrajectory = v == true end,
-        vd_hud = function(v) bInfoHud = v == true end,
-        vd_hl_dist = function(v) highlightDistance = math.clamp(tonumber(v) or 1000, 25, 1000) end,
-        vd_hl_fill = function(v) bHighlightFill = v == true end,
-        vd_hl_outline = function(v) bHighlightOutline = v == true end,
-        vd_skill = function(v) bAutoSkillCheck = v == true end,
-        vd_parry = function(v) bAutoParry = v == true end,
-        vd_parry_range = function(v) bShowParryRange = v == true end,
-        vd_auto_pallet = function(v) bAutoPallet = v == true end,
-        vd_crouch = function(v) bAutoCrouch = v == true end,
-        vd_vault = function(v) vault.Enabled = v == true end,
-        vd_moonwalk = function(v) bMoonwalk = v == true end,
-        vd_pumpkin = function(v) bPumpkinESP = v == true end,
-        vd_parry_predict = function(v) parryTuning.Prediction = math.clamp(tonumber(v) or .1, 0, .5) end,
-        vd_parry_dist = function(v) parryTuning.Range = math.clamp(tonumber(v) or 6.9, 2, 15) end,
-        vd_parry_humanize = function(v) parryTuning.HumanizeMs = math.clamp(tonumber(v) or 40, 0, 200) end,
-    }
-    local colours = {
-        vd_gen_col = function(c) generatorColor = c end,
-        vd_gen_done = function(c) completedColor = c end,
-        vd_kicked_col = function(c) regressingColor = c end,
-        vd_pal_col = function(c) palletColor = c end,
-        vd_win_col = function(c) windowColor = c end,
-        vd_trap_col = function(c) trapColor = c end,
-        vd_zombie_col = function(c) zombieColor = c end,
-        vd_pumpkin_col = function(c) pumpkinColor = c end,
-        vd_dagger_start = function(c)
-            daggerColor = c
-            RebuildDaggerGradient()
-        end,
-        vd_dagger_end = function(c)
-            daggerEndColor = c
-            RebuildDaggerGradient()
-        end,
-        vd_parry_col = function(c) parryRangeColor = c end,
-    }
-
-    local function AsColour(value)
-        if typeof(value) == "Color3" then return value end
-        if type(value) == "table" then
-            if type(value.R) == "number" then return Color3.new(value.R, value.G, value.B) end
-            if type(value[1]) == "number" then return Color3.fromRGB(value[1], value[2], value[3]) end
-        end
-        return nil
+local uiSource = httpget("https://raw.githubusercontent.com/tester945/KdmFTiAR/refs/heads/main/UIlib.lua")
+if uiSource ~= "" then loadstring(uiSource)() end
+if not _G.MatchaUILib and isfile("MatchaUI.lua") then loadstring(readfile("MatchaUI.lua"))() end
+local UILib = _G.MatchaUILib
+if UILib then
+    local window = UILib.new({Title = "Andris", Subtitle = "Violence District", Version = "2.0", Folder = "AndrisMatchaVD", Footer = "Matcha", BlockInput = true})
+    moonwalk.Window = window
+    window.OnUnload = function()
+        if Running() then guard.Unload("menu unloaded") end
     end
 
-    local widgetErrors, reported = {}, {}
-
-    local function Widget(section, method, key, ...)
-        local fn = section and section[method]
-        if type(fn) ~= "function" then
-            widgetErrors[key] = widgetErrors[key] or (method .. " is not a function on the section")
-            return nil
-        end
-        local ok, result = pcall(fn, section, ...)
-        if not ok then widgetErrors[key] = widgetErrors[key] or tostring(result) end
-        return result
+    local function Bool(setter)
+        return function(v) setter(v == true) end
     end
 
-    local function Picker(section, id, colour)
-        Widget(section, "ColorPicker", id, id, colour.R, colour.G, colour.B, 1, function(value)
-            local picked = AsColour(value)
-            if picked then colours[id](picked) end
-        end)
-    end
+    local mainTab = window:tab("Main")
+    local main = mainTab:section("Main")
+    main:toggle({Name = "Auto skill check", Flag = "vd_skill", Default = bAutoSkillCheck, Callback = Bool(function(v) bAutoSkillCheck = v end)})
+    main:toggle({Name = "Auto drop pallet on killer", Flag = "vd_auto_pallet", Default = bAutoPallet, Callback = Bool(function(v) bAutoPallet = v end)})
+    main:toggle({Name = "Auto crouch (against Abysswalker)", Flag = "vd_crouch", Default = bAutoCrouch, Callback = Bool(function(v) bAutoCrouch = v end)})
+    main:toggle({Name = "Moonwalk", Flag = "vd_moonwalk", Default = moonwalk.Enabled, Callback = Bool(function(v) moonwalk.Enabled = v end)})
+    main:dropdown({Name = "Moonwalk mode", Flag = "vd_moonwalk_mode", Values = {"Blatant", "Legit"}, Default = "Blatant", Callback = function(v)
+        moonwalk.Mode = if v == "Legit" then "Legit" else "Blatant"
+    end})
+    main:keybind({Name = "Moonwalk bind", Flag = "vd_moonwalk_kb", Default = moonwalk.DefaultKey, Show = function(w) return w:get("vd_moonwalk_mode") == "Legit" end})
 
-    local function Picker2(section, id1, colour1, id2, colour2)
-        Widget(section, "ColorPicker2", id1, id1, {colour1.R, colour1.G, colour1.B, 1}, id2, {colour2.R, colour2.G, colour2.B, 1}, function(first, _, second)
-            local picked1, picked2 = AsColour(first), AsColour(second)
-            if picked1 then colours[id1](picked1) end
-            if picked2 then colours[id2](picked2) end
-        end)
-    end
+    local parrying = mainTab:section("React parry")
+    parrying:toggle({Name = "React parry", Flag = "vd_parry", Default = bAutoParry, Callback = Bool(function(v) bAutoParry = v end)})
+    parrying:toggle({Name = "Visualize react parry", Flag = "vd_parry_range", Default = bShowParryRange, Callback = Bool(function(v) bShowParryRange = v end)})
+    parrying:slider({Name = "Killer prediction (s)", Flag = "vd_parry_predict", Min = 0, Max = .5, Float = true, Default = parryTuning.Prediction, Callback = function(v)
+        parryTuning.Prediction = math.clamp(tonumber(v) or .1, 0, .5)
+    end})
+    parrying:slider({Name = "Range (studs)", Flag = "vd_parry_dist", Min = 2, Max = 15, Float = true, Step = .1, Format = "%.1f", Default = parryTuning.Range, Callback = function(v)
+        parryTuning.Range = math.clamp(tonumber(v) or 6.9, 2, 15)
+    end})
+    parrying:slider({Name = "Humanize (max ms)", Flag = "vd_parry_humanize", Min = 0, Max = 200, Default = parryTuning.HumanizeMs, Callback = function(v)
+        parryTuning.HumanizeMs = math.clamp(tonumber(v) or 40, 0, 200)
+    end})
 
-    local function Section(tab, name, side)
-        local ok, section = pcall(tab.Section, tab, name, side)
-        if not ok then
-            widgetErrors[name] = widgetErrors[name] or tostring(section)
-            return nil
-        end
-        return section
-    end
+    local vaulting = mainTab:section("Fast vault")
+    vaulting:toggle({Name = "Always fast vault", Flag = "vd_vault", Default = vault.Enabled, Callback = Bool(function(v) vault.Enabled = v end)})
+    vaulting:button({Name = "Scan for always fast vault", Callback = function()
+        if vault.ScanNow then vault.ScanNow() end
+    end})
 
-    local function Toggle(section, id, label)
-        Widget(section, "Toggle", id, id, label, defaults[id])
-    end
+    local visualTab = window:tab("Visual")
+    local esp = visualTab:section("ESP")
+    esp:toggle({Name = "Generator ESP", Flag = "vd_gen", Default = bGeneratorESP, Callback = Bool(function(v) bGeneratorESP = v end)})
+    esp:toggle({Name = "Kicked generator color", Flag = "vd_kicked", Default = bKickedColor, Callback = Bool(function(v) bKickedColor = v end)})
+    esp:toggle({Name = "Pallet ESP", Flag = "vd_pal", Default = bPalletESP, Callback = Bool(function(v) bPalletESP = v end)})
+    esp:toggle({Name = "Window ESP", Flag = "vd_win", Default = bWindowESP, Callback = Bool(function(v) bWindowESP = v end)})
+    esp:toggle({Name = "Bear trap ESP", Flag = "vd_trap", Default = bTrapESP, Callback = Bool(function(v) bTrapESP = v end)})
+    esp:toggle({Name = "Cure zombie skeleton ESP", Flag = "vd_zombie", Default = bZombieESP, Callback = Bool(function(v) bZombieESP = v end)})
+    esp:toggle({Name = "Pumpkin ESP", Flag = "vd_pumpkin", Default = bPumpkinESP, Callback = Bool(function(v) bPumpkinESP = v end)})
+    esp:toggle({Name = "Veil dagger trajectory", Flag = "vd_dagger", Default = bDaggerTrajectory, Callback = Bool(function(v) bDaggerTrajectory = v end)})
+    esp:toggle({Name = "Info HUD", Flag = "vd_hud", Default = bInfoHud, Callback = Bool(function(v) bInfoHud = v end)})
 
-    local function BuildTab(tab)
-        local esp = Section(tab, "ESP", "Left")
-        Toggle(esp, "vd_gen", "Generator ESP")
-        Picker2(esp, "vd_gen_col", generatorColor, "vd_gen_done", completedColor)
-        Toggle(esp, "vd_kicked", "Kicked generator color")
-        Picker(esp, "vd_kicked_col", regressingColor)
-        Toggle(esp, "vd_pal", "Pallet ESP")
-        Picker(esp, "vd_pal_col", palletColor)
-        Toggle(esp, "vd_win", "Window ESP")
-        Picker(esp, "vd_win_col", windowColor)
-        Toggle(esp, "vd_trap", "Bear trap ESP")
-        Picker(esp, "vd_trap_col", trapColor)
-        Toggle(esp, "vd_zombie", "Cure zombie skeleton ESP")
-        Picker(esp, "vd_zombie_col", zombieColor)
-        Toggle(esp, "vd_pumpkin", "Pumpkin ESP")
-        Picker(esp, "vd_pumpkin_col", pumpkinColor)
-        Toggle(esp, "vd_dagger", "Veil dagger trajectory")
-        Picker2(esp, "vd_dagger_start", daggerColor, "vd_dagger_end", daggerEndColor)
-        Toggle(esp, "vd_hud", "Info HUD")
+    local highlighting = visualTab:section("Highlighting")
+    highlighting:slider({Name = "Highlight render distance", Flag = "vd_hl_dist", Min = 25, Max = 1000, Step = 25, Default = highlightDistance, Callback = function(v)
+        highlightDistance = math.clamp(tonumber(v) or 1000, 25, 1000)
+    end})
+    highlighting:toggle({Name = "Highlight fill", Flag = "vd_hl_fill", Default = bHighlightFill, Callback = Bool(function(v) bHighlightFill = v end)})
+    highlighting:toggle({Name = "Highlight outline", Flag = "vd_hl_outline", Default = bHighlightOutline, Callback = Bool(function(v) bHighlightOutline = v end)})
 
-        local highlighting = Section(tab, "Highlighting", "Left")
-        Widget(highlighting, "SliderInt", "vd_hl_dist", "vd_hl_dist", "Highlight render distance", 25, 1000, defaults.vd_hl_dist)
-        Toggle(highlighting, "vd_hl_fill", "Highlight fill")
-        Toggle(highlighting, "vd_hl_outline", "Highlight outline")
+    local colors = visualTab:section("Colors")
+    colors:color({Name = "Generator", Flag = "vd_gen_col", Default = generatorColor, Callback = function(c) generatorColor = c end})
+    colors:color({Name = "Completed generator", Flag = "vd_gen_done", Default = completedColor, Callback = function(c) completedColor = c end})
+    colors:color({Name = "Kicked generator", Flag = "vd_kicked_col", Default = regressingColor, Callback = function(c) regressingColor = c end})
+    colors:color({Name = "Pallet", Flag = "vd_pal_col", Default = palletColor, Callback = function(c) palletColor = c end})
+    colors:color({Name = "Window", Flag = "vd_win_col", Default = windowColor, Callback = function(c) windowColor = c end})
+    colors:color({Name = "Bear trap", Flag = "vd_trap_col", Default = trapColor, Callback = function(c) trapColor = c end})
+    colors:color({Name = "Cure zombie", Flag = "vd_zombie_col", Default = zombieColor, Callback = function(c) zombieColor = c end})
+    colors:color({Name = "Pumpkin", Flag = "vd_pumpkin_col", Default = pumpkinColor, Callback = function(c) pumpkinColor = c end})
+    colors:color({Name = "Enemy dagger start", Flag = "vd_dagger_start", Default = daggerColor, Callback = function(c)
+        daggerColor = c
+        RebuildDaggerGradient()
+    end})
+    colors:color({Name = "Enemy dagger end", Flag = "vd_dagger_end", Default = daggerEndColor, Callback = function(c)
+        daggerEndColor = c
+        RebuildDaggerGradient()
+    end})
+    colors:color({Name = "React parry range", Flag = "vd_parry_col", Default = parryRangeColor, Callback = function(c) parryRangeColor = c end})
 
-        local main = Section(tab, "Main", "Right")
-        Toggle(main, "vd_skill", "Auto skill check")
-        Toggle(main, "vd_auto_pallet", "Auto drop pallet on killer")
-        Toggle(main, "vd_crouch", "Auto crouch (against Abysswalker)")
-        Toggle(main, "vd_moonwalk", "Moonwalk (hold S)")
-
-        local parrying = Section(tab, "React parry", "Right")
-        Toggle(parrying, "vd_parry", "React parry")
-        Toggle(parrying, "vd_parry_range", "Visualize react parry")
-        Picker(parrying, "vd_parry_col", parryRangeColor)
-        Widget(parrying, "SliderFloat", "vd_parry_predict", "vd_parry_predict", "Killer prediction (s)", 0, .5, defaults.vd_parry_predict, "%.2f")
-        Widget(parrying, "SliderFloat", "vd_parry_dist", "vd_parry_dist", "Range (studs)", 2, 15, defaults.vd_parry_dist, "%.1f")
-        Widget(parrying, "SliderInt", "vd_parry_humanize", "vd_parry_humanize", "Humanize (max ms)", 0, 200, defaults.vd_parry_humanize)
-
-        local vaulting = Section(tab, "Fast vault", "Right")
-        Toggle(vaulting, "vd_vault", "Always fast vault")
-        Widget(vaulting, "Button", "vd_vault_scan", "Scan for always fast vault", function()
-            if vault.ScanNow then vault.ScanNow() end
-        end)
-    end
-
-    vault.RebuildMenu = function()
-        pcall(UI.RemoveTab, tabName)
-        UI.AddTab(tabName, BuildTab)
-    end
-    vault.RebuildMenu()
-
-    AddJob("Menu sync", false, function()
-        local last = {}
-        while Running() do
-            for key, err in widgetErrors do
-                if not reported[key] then
-                    reported[key] = true
-                    print("[MatchaVD] menu widget " .. key .. " failed: " .. err)
-                end
-            end
-            for id, set in apply do
-                local ok, value = pcall(UI.GetValue, id)
-                if not ok or value == nil then value = defaults[id] end
-                if last[id] ~= value then
-                    last[id] = value
-                    set(value)
-                end
-            end
-            for id, set in colours do
-                local ok, value = pcall(UI.GetValue, id)
-                local colour = ok and AsColour(value)
-                if colour then
-                    local key = string.format("%.3f %.3f %.3f", colour.R, colour.G, colour.B)
-                    if last[id] ~= key then
-                        last[id] = key
-                        set(colour)
-                    end
-                end
-            end
-            Sleep(.1)
-        end
-    end)
+    window:start()
+else
+    print("[MatchaVD] UI library failed to load, running without a menu")
 end
 
 _G.MatchaVDConnection = RunService.RenderStepped:Connect(function()
