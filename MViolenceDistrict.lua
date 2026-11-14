@@ -282,7 +282,7 @@ parry.Dot.NumSides = 16
 parry.Dot.Transparency = 1
 parry.Dot.Visible = false
 allDrawings[#allDrawings + 1] = parry.Dot
-local world ={NextRefresh = 0, NextKillerType = 0, KillerType = ""}
+local world ={NextRefresh = 0, NextKillerType = 0, KillerType = "", VeilAim = {Enabled = false, Fov = 30, Speed = 1, XSize = 7, XColor = Color3.fromRGB(255, 60, 60)}}
 
 local function ReadStdString(address)
     local capacity = memory_read("uintptr_t", address + 0x18)
@@ -1475,6 +1475,93 @@ do
         return false
     end
 
+    world.VeilAim.ArcHeight = function(speed, distance, angle)
+        local horizontal = speed * math.cos(angle)
+        if horizontal <= 1e-3 then return -math.huge, 0 end
+        local t = distance / horizontal
+        return speed * math.sin(angle) * t - daggerGravity * t * (t - daggerLag) / 2, t
+    end
+
+    world.VeilAim.SolvePitch = function(speed, distance, rise)
+        local low, high = -1.4, 1.4
+        for _ = 1, 40 do
+            local a, b = low + (high - low) / 3, high - (high - low) / 3
+            if world.VeilAim.ArcHeight(speed, distance, a) < world.VeilAim.ArcHeight(speed, distance, b) then low = a else high = b end
+        end
+        local peak = (low + high) / 2
+        if world.VeilAim.ArcHeight(speed, distance, peak) < rise then return nil end
+        low, high = -1.4, peak
+        for _ = 1, 40 do
+            local middle = (low + high) / 2
+            if world.VeilAim.ArcHeight(speed, distance, middle) < rise then low = middle else high = middle end
+        end
+        local angle = (low + high) / 2
+        local _, t = world.VeilAim.ArcHeight(speed, distance, angle)
+        return angle, t
+    end
+
+    world.VeilAim.Solve = function(cframe, target, speed, locked)
+        local head = target.HeadPosition
+        if not head or not target.Position then return nil end
+        local origin, look = cframe.Position, cframe.LookVector
+        local centre = Vector3.new(target.Position.X, (target.Bottom + head.Y + headTop) / 2, target.Position.Z)
+        local toCentre = centre - origin
+        if toCentre.Magnitude < 1 then return nil end
+        if not locked and math.deg(math.acos(math.clamp(look:Dot(toCentre.Unit), -1, 1))) > world.VeilAim.Fov then return nil end
+        local velocity = target.Motion.Velocity or Vector3.new(0, 0, 0)
+        local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+        local t, angle, point = 0, nil, centre
+        for _ = 1, 3 do
+            point = centre + flatVelocity * t
+            local flat = Vector3.new(point.X - origin.X, 0, point.Z - origin.Z)
+            angle, t = world.VeilAim.SolvePitch(speed, flat.Magnitude, point.Y - origin.Y)
+            if not angle then return nil end
+        end
+        world.VeilAim.MarkPoint = point
+        local flat = Vector3.new(point.X - origin.X, 0, point.Z - origin.Z)
+        if flat.Magnitude < .01 then return nil end
+        local unit = flat.Unit
+        return Vector3.new(unit.X * math.cos(angle), math.sin(angle), unit.Z * math.cos(angle))
+    end
+
+    world.VeilAim.RotationAddress = function(camera)
+        local aim = world.VeilAim
+        local base = camera.Address
+        if aim.CameraBase == base and aim.Rotation then return aim.Rotation end
+        local now = tick()
+        if now < (aim.NextFind or 0) then return nil end
+        aim.NextFind = now + .1
+        local cframe = camera.CFrame
+        local look, position = cframe.LookVector, cframe.Position
+        local function Near(address, value, tolerance)
+            local read = memory_read("float", address)
+            return type(read) == "number" and math.abs(read - value) <= tolerance
+        end
+        for offset = 0x40, 0x400, 4 do
+            local address = base + offset
+            if Near(address + 8, -look.X, .01) and Near(address + 20, -look.Y, .01) and Near(address + 32, -look.Z, .01)
+                and Near(address + 36, position.X, .05) and Near(address + 40, position.Y, .05) and Near(address + 44, position.Z, .05) then
+                aim.CameraBase, aim.Rotation = base, address
+                return address
+            end
+        end
+        return nil
+    end
+
+    world.VeilAim.Steer = function(camera, look, want)
+        local address = world.VeilAim.RotationAddress(camera)
+        if not address or not guard.SameServer() then return end
+        local blended = look + (want - look) * world.VeilAim.Speed
+        if blended.Magnitude < 1e-4 then return end
+        local back = -blended.Unit
+        local right = Vector3.new(0, 1, 0):Cross(back)
+        if right.Magnitude < 1e-4 then return end
+        right = right.Unit
+        local up = back:Cross(right)
+        local values = {right.X, up.X, back.X, right.Y, up.Y, back.Y, right.Z, up.Z, back.Z}
+        for i, value in values do memory_write("float", address + (i - 1) * 4, value) end
+    end
+
     local function DrawArc(origin, velocity, startOffset, endY, colors)
         local steps = BuildArc(origin, velocity, endY)
         if not steps then return end
@@ -1558,6 +1645,31 @@ do
         for _, thrower in throwers do
             UpdateAimState(thrower.State, thrower.Animator, now)
             thrower.Aiming = thrower.State.Aiming == true and (not thrower.IsLocal or leftHeld == true)
+            if thrower.IsLocal then
+                local aim = world.VeilAim
+                aim.MarkPoint = nil
+                local camera = workspace.CurrentCamera
+                local keyHeld = aim.KeyHeld and aim.KeyHeld()
+                if not keyHeld or not thrower.Aiming then aim.Locked = nil end
+                if aim.Enabled and camera and thrower.Aiming and world.KillerType == "Veil" then
+                    local target
+                    if aim.Locked then
+                        for _, candidate in targets do
+                            if candidate.Root == aim.Locked then target = candidate end
+                        end
+                    end
+                    local locked = target ~= nil
+                    target = target or TargetBody()
+                    if target then
+                        local cframe = camera.CFrame
+                        local want = aim.Solve(cframe, target, charge.At(now), locked)
+                        if want and keyHeld then
+                            aim.Locked = target.Root
+                            aim.Steer(camera, cframe.LookVector, want)
+                        end
+                    end
+                end
+            end
             if thrower.Aiming then
                 if thrower.IsLocal then
                     local camera = workspace.CurrentCamera
@@ -1581,13 +1693,24 @@ do
         local now = tick()
         if ismouse1pressed() == true then charge.HeldSince = charge.HeldSince or now else charge.HeldSince = nil end
         for _, thrower in throwers do
+            local point = thrower.IsLocal and thrower.Aiming and world.VeilAim.Enabled and world.VeilAim.MarkPoint
+            if point then
+                local x, y = Project(point.X, point.Y, point.Z)
+                if x then
+                    local size = world.VeilAim.XSize
+                    DrawLine(x - size, y - size, x + size, y + size, world.VeilAim.XColor)
+                    DrawLine(x - size, y + size, x + size, y - size, world.VeilAim.XColor)
+                end
+            end
             if thrower.Aiming then
                 if thrower.IsLocal then
                     local origin = Vector3.new(frame.PX, frame.PY, frame.PZ)
                     local look = Vector3.new(frame.LX, frame.LY, frame.LZ)
                     local right = Vector3.new(frame.RX, frame.RY, frame.RZ)
-                    DrawArc(origin, look * charge.At(now), right * localRightOffset + look * localForwardOffset, thrower.EndY, if thrower.Hit then hitGradient else missGradient)
-                elseif thrower.Origin and thrower.Finish then
+                    if bDaggerTrajectory then
+                        DrawArc(origin, look * charge.At(now), right * localRightOffset + look * localForwardOffset, thrower.EndY, if thrower.Hit then hitGradient else missGradient)
+                    end
+                elseif bDaggerTrajectory and thrower.Origin and thrower.Finish then
                     DrawStraight(thrower.Origin, thrower.Finish, gradient)
                 end
             end
@@ -2238,7 +2361,7 @@ local function Render()
         end
         RenderMapEntities()
         if bShowParryRange then RenderParry() end
-        if bDaggerTrajectory then RenderDaggerTrajectory() end
+        if bDaggerTrajectory or world.VeilAim.Enabled then RenderDaggerTrajectory() end
     end
     local dot = parry.Dot
     if parry.DotX then
@@ -2520,7 +2643,7 @@ AddJob("Dagger aim", false, function()
     if not activeAnimationsOffset or not trackAnimationOffset or not animationIdOffset then return end
     local paused = false
     while Running() do
-        if not bDaggerTrajectory or not isrbxactive() then
+        if not (bDaggerTrajectory or world.VeilAim.Enabled) or not isrbxactive() then
             paused = true
             Sleep(.5)
         else
@@ -2536,7 +2659,6 @@ do
     local gameDefaults = {DISTANCE = 3.5, REPEAT_DISTANCE = 4, DOT = .7071067811865476, MIN_SPEED = 12.5, ARRIVE_GRACE = .12, SIDESTEP_TIME = .25}
     local maxPreset = {DISTANCE = .1, REPEAT_DISTANCE = .1, DOT = -1, MIN_SPEED = 0, ARRIVE_GRACE = 1, SIDESTEP_TIME = 5}
     local checkInterval = .5
-    local maxAutoRetries = 3
     local tolerance = .006
     local clusterSpan = 0x400
 
@@ -2660,81 +2782,22 @@ do
     end
 
     vault.ScanNow = function()
-        if not entries and not vault.Scanning and not requested then requested = "Manual" end
-    end
-
-    local fadeOffset = visibleOffset - 0x49
-    local loading = {NextFind = 0, Above = 0}
-
-    local function WatchLoadingScreen(now)
-        if not isrbxactive() then
-            loading.Frame, loading.BelowSince, loading.Above, loading.NextFind = nil, nil, 0, 0
+        if entries or vault.Scanning or requested then return end
+        if world.LocalTeam ~= "Survivors" then
+            notify("You need to be a survivor to scan for always fast vault.", "Fast vault", 4)
             return
         end
-        if now >= loading.NextFind then
-            loading.NextFind = now + 2
-            local gui = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
-            local darkness = gui and gui:FindFirstChild("Darkness")
-            loading.Frame = darkness and darkness:FindFirstChild("Frame")
-        end
-        local frameAddress = loading.Frame and loading.Frame.Address
-        local value = frameAddress and memory_read("float", frameAddress + fadeOffset)
-        if type(value) ~= "number" or value ~= value then return end
-        if value < .5 then
-            loading.BelowSince = loading.BelowSince or now
-            loading.Above = 0
-        else
-            loading.Above += 1
-            if loading.Above == 2 and loading.BelowSince and now - loading.BelowSince >= 2 then loading.ScanAt = now + 10 end
-            if loading.Above >= 2 then loading.BelowSince = nil end
-        end
+        requested = "Manual"
     end
 
     AddJob("Fast vault", false, function()
-        local startupUntil = tick() + 3
-        local retryAt
-        local autoFailures = 0
-        local wasEnabled = vault.Enabled
         while Running() do
-            local justEnabled = vault.Enabled and not wasEnabled
-            wasEnabled = vault.Enabled
-            if not entries and not vault.Scanning then
-                local now = tick()
-                if startupUntil and now > startupUntil then startupUntil = nil end
-                if vault.Enabled then
-                    if (startupUntil or justEnabled) and world.LocalTeam == "Survivors" and world.LocalRoot then
-                        startupUntil = nil
-                        autoFailures = 0
-                        requested = "Auto"
-                    end
-                    WatchLoadingScreen(now)
-                    if loading.ScanAt and now >= loading.ScanAt then
-                        loading.ScanAt = nil
-                        autoFailures = 0
-                        requested = "Auto"
-                    end
-                    if retryAt and now >= retryAt then
-                        retryAt = nil
-                        requested = "Auto"
-                    end
-                else
-                    loading.ScanAt, retryAt = nil, nil
-                end
-            end
-            if requested == "Auto" and (world.LocalTeam ~= "Survivors" or not vault.Enabled) then
-                requested, retryAt = false, nil
-            end
             if requested then
-                local kind = requested
                 requested = false
                 if not entries then
                     ScanWithPopup()
-                    if not entries and kind == "Auto" then
-                        autoFailures += 1
-                        if autoFailures < maxAutoRetries then retryAt = tick() + 2 end
-                    end
+                    if not entries then notify("Scan failed, try again.", "Fast vault", 4) end
                 end
-                if entries then retryAt, autoFailures = nil, 0 end
             end
             if entries then
                 local wanted = if vault.Enabled then Desired() else gameDefaults
@@ -2876,8 +2939,19 @@ if UILib then
         parryTuning.HumanizeMs = math.clamp(tonumber(v) or 40, 0, 200)
     end})
 
+    local aiming = mainTab:section("Veil aimbot")
+    aiming:toggle({Name = "Veil aimbot", Flag = "vd_veil_aim", Default = world.VeilAim.Enabled, Callback = Bool(function(v) world.VeilAim.Enabled = v end)})
+    aiming:keybind({Name = "Aimbot key (hold)", Flag = "vd_veil_kb", Default = 0x06})
+    world.VeilAim.KeyHeld = function() return window:keyHeld("vd_veil_kb") end
+    aiming:slider({Name = "Aimbot FOV (degrees)", Flag = "vd_veil_fov", Min = 5, Max = 180, Default = world.VeilAim.Fov, Callback = function(v)
+        world.VeilAim.Fov = math.clamp(tonumber(v) or 30, 5, 180)
+    end})
+    aiming:slider({Name = "Aimbot speed", Flag = "vd_veil_aimspeed", Min = .05, Max = 1, Float = true, Default = world.VeilAim.Speed, Callback = function(v)
+        world.VeilAim.Speed = math.clamp(tonumber(v) or 1, .05, 1)
+    end})
+
     local vaulting = mainTab:section("Fast vault")
-    vaulting:toggle({Name = "Always fast vault", Flag = "vd_vault", Default = vault.Enabled, Callback = Bool(function(v) vault.Enabled = v end)})
+    vaulting:toggle({Name = "Always fast vault", Flag = "vd_vault", Default = vault.Enabled, Show = function() return vault.Ready == true end, Callback = Bool(function(v) vault.Enabled = v end)})
     vaulting:button({Name = "Scan for always fast vault", Callback = function()
         if vault.ScanNow then vault.ScanNow() end
     end})
