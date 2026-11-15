@@ -1,41 +1,34 @@
 if game.GameId == 6739698191 then
 
-local settings = {
-    GeneratorColor = Color3.fromRGB(157, 159, 255),
-    PalletColor = Color3.fromRGB(255, 140, 0),
-    WindowColor = Color3.fromRGB(204, 184, 184),
-    CompletedColor = Color3.fromRGB(80, 220, 100),
-    RepairingColor = Color3.fromRGB(255, 220, 60),
-    RegressingColor = Color3.fromRGB(255, 60, 60),
-    DaggerColor = Color3.fromRGB(170, 120, 255),
-    DaggerEndColor = Color3.fromRGB(255, 80, 80),
-    TrapColor = Color3.fromRGB(255, 70, 70),
-    ZombieColor = Color3.fromRGB(120, 255, 120),
-    PumpkinColor = Color3.fromRGB(255, 165, 40),
-    ParryRangeColor = Color3.fromRGB(255, 255, 255),
-    GeneratorESP = true,
-    PalletESP = true,
-    WindowESP = true,
-    AutoSkillCheck = true,
-    AutoParry = true,
-    ShowParryRange = true,
-    DaggerTrajectory = true,
-    TrapESP = true,
-    ZombieESP = true,
-    AutoPallet = false,
-    AutoCrouch = true,
-    InfoHud = true,
-    KickedColor = true,
-    HighlightFill = true,
-    HighlightOutline = true,
-    HighlightDistance = 1000,
-    DebugStats = false,
-    PumpkinESP = false,
-    HideBlind = false,
-}
+local generatorColor = Color3.fromRGB(157, 159, 255)
+local palletColor = Color3.fromRGB(255, 140, 0)
+local windowColor = Color3.fromRGB(204, 184, 184)
+local completedColor = Color3.fromRGB(80, 220, 100)
+local repairingColor = Color3.fromRGB(255, 220, 60)
+local regressingColor = Color3.fromRGB(255, 60, 60)
 local textSize = 14
 local textFont = Drawing.Fonts and (Drawing.Fonts.SystemBold or Drawing.Fonts.System)
+local bGeneratorESP = true
+local bPalletESP = true
+local bWindowESP = true
+local bAutoSkillCheck = true
+local bAutoParry = true
+local bShowParryRange = true
+local bDaggerTrajectory = true
+local daggerColor = Color3.fromRGB(170, 120, 255)
+local daggerEndColor = Color3.fromRGB(255, 80, 80)
+local bTrapESP = true
+local bZombieESP = true
+local bAutoPallet = false
+local bAutoCrouch = true
+local bInfoHud = true
+local bKickedColor = true
+local bHighlightFill = true
+local bHighlightOutline = true
+local highlightDistance = 1000
 local fillOpacity = .35
+local trapColor = Color3.fromRGB(255, 70, 70)
+local zombieColor = Color3.fromRGB(120, 255, 120)
 local skillCheckAngle = 108
 local outlineThickness = 1.5
 local palletNearDistance = 150
@@ -50,8 +43,11 @@ local windowStableScans = 1
 local minimumWindows = 3
 local palletPollInterval = .125
 local loopInterval = 1 / 60
+local bDebugStats = false
 local vault = {Enabled = false, Distance = 0, Angle = 180, Speed = 0}
 local moonwalk = {Enabled = false, Mode = "Blatant", DefaultKey = 0x05}
+local bPumpkinESP = false
+local pumpkinColor = Color3.fromRGB(255, 165, 40)
 
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
@@ -117,13 +113,13 @@ function parryTuning.Poll()
     parryTuning.WasDown = down
 end
 local parryCooldown = 1
+local parryRangeColor = Color3.fromRGB(255, 255, 255)
 local parryAttackColor = Color3.fromRGB(255, 70, 70)
 local parryCircleSegments = 36
 
 local runId = tick()
 _G.MatchaVDRunId = runId
 if _G.MatchaVDConnection then _G.MatchaVDConnection:Disconnect() end
-if _G.MatchaVDRestore then _G.MatchaVDRestore() end
 if _G.MatchaVDBlindRestore then _G.MatchaVDBlindRestore() end
 for _, object in _G.MatchaVDDrawings or {} do
     if type(object) == "table" then (object.Square or object.Object):Remove() else object:Remove() end
@@ -183,7 +179,6 @@ function guard.Unload(reason)
     _G.MatchaVDDrawings = nil
     keyrelease(0xA2)
     keyrelease(0x20)
-    if moonwalk.Restore then moonwalk.Restore() end
     if _G.MatchaVDBlindRestore then _G.MatchaVDBlindRestore() end
     if moonwalk.Window then moonwalk.Window:destroy() end
     print("[MatchaVD] unloaded: " .. tostring(reason))
@@ -295,7 +290,7 @@ end
 
 local parry = {History = {}, LastParry = 0, NextRefresh = 0, AnimationIds = {}, CrouchAnimations = {
     ["100014992013740"] = {Name = "Abysswalker lunge", Duration = 1.1, Range = 30},
-}, RenderHistory = {}, KillerRenderHistory = {}, KillerHistory = {}, Fresh = {}}
+}, RenderHistory = {}, KillerRenderHistory = {}}
 parry.Dot = Drawing.new("Circle")
 parry.Dot.Filled = true
 parry.Dot.Radius = 4
@@ -303,19 +298,7 @@ parry.Dot.NumSides = 16
 parry.Dot.Transparency = 1
 parry.Dot.Visible = false
 allDrawings[#allDrawings + 1] = parry.Dot
-
-function parry.Track(history, now, position)
-    local newest = history[#history]
-    if newest and now - newest.Time > .5 then table.clear(history) end
-    history[#history + 1] = {Time = now, Position = position}
-    while #history > 2 and now - history[2].Time >= .15 do table.remove(history, 1) end
-    local oldest = history[1]
-    if now - oldest.Time <= .03 then return nil end
-    local velocity = (position - oldest.Position) / (now - oldest.Time)
-    return Vector3.new(velocity.X, 0, velocity.Z)
-end
-
-local world = {NextRefresh = 0, NextKillerType = 0, KillerType = "", Cache = {}, Roster = {}, VeilAim = {Enabled = false, Fov = 30, Speed = 1, XSize = 7, XColor = Color3.fromRGB(255, 60, 60)}}
+local world ={NextRefresh = 0, NextKillerType = 0, KillerType = "", VeilAim = {Enabled = false, Fov = 30, Speed = 1, XSize = 7, XColor = Color3.fromRGB(255, 60, 60)}}
 
 local function ReadStdString(address)
     local capacity = memory_read("uintptr_t", address + 0x18)
@@ -398,6 +381,10 @@ local function MemoryPosition(partAddress)
     return Vector3.new(x, y, z)
 end
 
+local function ReadAttribute(instance, name)
+    return instance and instance:GetAttribute(name)
+end
+
 local function Finish(pose)
     local half = pose.Size / 2
     local right, up, look = pose.Right * half.X, pose.Up * half.Y, pose.Look * half.Z
@@ -411,7 +398,6 @@ local function Finish(pose)
     end
     pose.Corners = corners
     pose.CX, pose.CY, pose.CZ = pose.Position.X, pose.Position.Y, pose.Position.Z
-    pose.Radius = half.Magnitude
     return pose
 end
 
@@ -528,9 +514,9 @@ local function UpdateGenerators(now)
     for _, entry in trackers.Generators.Entries do
         if not entry.Completed and now >= entry.NextPoll then
             entry.NextPoll = now + progressPollInterval
-            local progress = tonumber(entry.Model:GetAttribute("RepairProgress"))
+            local progress = tonumber(ReadAttribute(entry.Model, "RepairProgress"))
             if progress then
-                local regressing = entry.Model:GetAttribute("Regressing")
+                local regressing = ReadAttribute(entry.Model, "Regressing")
                 if progress < 100 and (regressing == true or regressing == "true") then
                     entry.FallingUntil = now + progressStateTime
                 end
@@ -558,10 +544,10 @@ end
 
 local function GeneratorColor(entry)
     local state = entry.State
-    if state == "Done" then return settings.CompletedColor end
-    if state == "Falling" and settings.KickedColor then return settings.RegressingColor end
-    if state == "Rising" then return settings.RepairingColor end
-    return settings.GeneratorColor
+    if state == "Done" then return completedColor end
+    if state == "Falling" and bKickedColor then return regressingColor end
+    if state == "Rising" then return repairingColor end
+    return generatorColor
 end
 
 local function UpdatePallets(now)
@@ -726,48 +712,26 @@ local function UpdateCamera(now)
     end
     local focal = frame.Focal
     frame.Ready = focal ~= nil and focal == focal and focal > 0 and focal < 1e5 and frame.HalfWidth >= 1 and frame.HalfHeight >= 1
-    if frame.Ready then
-        frame.TanH, frame.TanV = frame.HalfWidth / focal, frame.HalfHeight / focal
-        frame.SecH, frame.SecV = math.sqrt(1 + frame.TanH * frame.TanH), math.sqrt(1 + frame.TanV * frame.TanV)
-    end
 end
 
-local function NewPool(kind, perTick, setup)
-    return {Kind = kind, PerTick = perTick, Setup = setup, Used = 0, Wanted = 0}
-end
+local lines = {}
+local usedLines, wantedLines = 0, 0
 
-local function GrowPool(pool)
-    for _ = 1, pool.PerTick do
-        if #pool >= pool.Wanted then return end
-        local object = Drawing.new(pool.Kind)
-        pool.Setup(object)
+local function GrowLines()
+    for _ = 1, 20 do
+        if #lines >= wantedLines then return end
+        local object = Drawing.new("Line")
+        object.Thickness = outlineThickness
+        object.Transparency = 1
         object.Visible = false
         allDrawings[#allDrawings + 1] = object
-        pool[#pool + 1] = {Object = object, Visible = false}
+        lines[#lines + 1] = {Object = object, Visible = false}
     end
 end
-
-local function FinishPool(pool)
-    local used = pool.Used
-    if used > pool.Wanted then pool.Wanted = used end
-    for index = used + 1, #pool do
-        local entry = pool[index]
-        if entry.Visible then
-            entry.Visible = false
-            entry.Object.Visible = false
-        end
-    end
-end
-
-local lines = NewPool("Line", 20, function(object)
-    object.Thickness = outlineThickness
-    object.Transparency = 1
-end)
 
 local function DrawLine(x1, y1, x2, y2, color)
-    local used = lines.Used + 1
-    lines.Used = used
-    local entry = lines[used]
+    usedLines += 1
+    local entry = lines[usedLines]
     if not entry then return end
     if entry.X1 ~= x1 or entry.Y1 ~= y1 then
         entry.X1, entry.Y1 = x1, y1
@@ -789,17 +753,26 @@ local function DrawLine(x1, y1, x2, y2, color)
     end
 end
 
-local texts = NewPool("Text", 2, function(object)
-    if textFont then object.Font = textFont end
-    object.Size = textSize
-    object.Center = true
-    object.Outline = true
-end)
+local texts = {}
+local usedTexts, wantedTexts = 0, 0
+
+local function GrowTexts()
+    for _ = 1, 2 do
+        if #texts >= wantedTexts then return end
+        local object = Drawing.new("Text")
+        if textFont then object.Font = textFont end
+        object.Size = textSize
+        object.Center = true
+        object.Outline = true
+        object.Visible = false
+        allDrawings[#allDrawings + 1] = object
+        texts[#texts + 1] = {Object = object, Visible = false}
+    end
+end
 
 local function DrawText(x, y, text, color)
-    local used = texts.Used + 1
-    texts.Used = used
-    local entry = texts[used]
+    usedTexts += 1
+    local entry = texts[usedTexts]
     if not entry then return end
     if entry.X ~= x or entry.Y ~= y then
         entry.X, entry.Y = x, y
@@ -820,15 +793,24 @@ local function DrawText(x, y, text, color)
     end
 end
 
-local triangles = NewPool("Triangle", 8, function(object)
-    object.Filled = true
-    object.Transparency = fillOpacity
-end)
+local triangles = {}
+local usedTriangles, wantedTriangles = 0, 0
+
+local function GrowTriangles()
+    for _ = 1, 8 do
+        if #triangles >= wantedTriangles then return end
+        local object = Drawing.new("Triangle")
+        object.Filled = true
+        object.Transparency = fillOpacity
+        object.Visible = false
+        allDrawings[#allDrawings + 1] = object
+        triangles[#triangles + 1] = {Object = object, Visible = false}
+    end
+end
 
 local function DrawTriangle(x1, y1, x2, y2, x3, y3, color)
-    local used = triangles.Used + 1
-    triangles.Used = used
-    local entry = triangles[used]
+    usedTriangles += 1
+    local entry = triangles[usedTriangles]
     if not entry then return end
     if entry.X1 ~= x1 or entry.Y1 ~= y1 then
         entry.X1, entry.Y1 = x1, y1
@@ -873,17 +855,13 @@ local function Before(a, b)
 end
 
 local function Highlight(pose, color, anyDistance)
-    if not settings.HighlightFill and not settings.HighlightOutline then return end
+    if not bHighlightFill and not bHighlightOutline then return end
     local px, py, pz = frame.PX, frame.PY, frame.PZ
     local lx, ly, lz = frame.LX, frame.LY, frame.LZ
     local rx, ry, rz = frame.RX, frame.RY, frame.RZ
     local ux, uy, uz = frame.UX, frame.UY, frame.UZ
     local ox, oy, oz = pose.CX - px, pose.CY - py, pose.CZ - pz
-    if not anyDistance and ox * ox + oy * oy + oz * oz > settings.HighlightDistance * settings.HighlightDistance then return end
-    local radius = pose.Radius
-    local centreDepth = ox * lx + oy * ly + oz * lz
-    if math.abs(ox * rx + oy * ry + oz * rz) > centreDepth * frame.TanH + radius * frame.SecH then return end
-    if math.abs(ox * ux + oy * uy + oz * uz) > centreDepth * frame.TanV + radius * frame.SecV then return end
+    if not anyDistance and ox * ox + oy * oy + oz * oz > highlightDistance * highlightDistance then return end
 
     local corners = pose.Corners
     local halfWidth, halfHeight, focal = frame.HalfWidth, frame.HalfHeight, frame.Focal
@@ -964,14 +942,14 @@ local function Highlight(pose, color, anyDistance)
     end
     count -= 1
     if count < 3 then return end
-    if settings.HighlightFill and not behind then
+    if bHighlightFill then
         local first = hull[1]
         for i = 2, count - 1 do
             local b, c = hull[i], hull[i + 1]
             DrawTriangle(screenX[first], screenY[first], screenX[b], screenY[b], screenX[c], screenY[c], color)
         end
     end
-    if settings.HighlightOutline then
+    if bHighlightOutline then
         for i = 1, count do
             local a, b = hull[i], hull[i % count + 1]
             DrawLine(screenX[a], screenY[a], screenX[b], screenY[b], color)
@@ -995,17 +973,28 @@ local function TeamName(player)
 end
 
 local function RefreshParry()
-    parry.Team = world.LocalTeam
-    parry.LocalRoot = world.LocalRoot
-    parry.HasDagger = world.HasDagger == true
-    local source = world.Killer
-    local killer = source and {Animator = source.Animator, Root = source.Root}
+    local player = Players.LocalPlayer
+    parry.Team = TeamName(player)
+    local character = player.Character
+    parry.LocalRoot = character and character:FindFirstChild("HumanoidRootPart")
+    parry.HasDagger = parry.LocalRoot ~= nil and (character:FindFirstChild("Parrying Dagger") ~= nil or ReadAttribute(player, "EquippedItem") == "Parrying Dagger")
+    local killer
+    for _, other in Players:GetPlayers() do
+        Yield()
+        if other ~= player and TeamName(other) == "Killer" then
+            local killerCharacter = other.Character
+            local humanoid = killerCharacter and killerCharacter:FindFirstChild("Humanoid")
+            local animator = humanoid and humanoid:FindFirstChild("Animator")
+            local root = killerCharacter and killerCharacter:FindFirstChild("HumanoidRootPart")
+            if animator and root then killer = {Animator = animator.Address, Root = root} end
+            break
+        end
+    end
     local old = parry.Killer
     if killer and old and killer.Animator == old.Animator then
         killer.Tracks = old.Tracks
     else
         parry.Attack = nil
-        table.clear(parry.KillerHistory)
     end
     parry.Killer = killer
 end
@@ -1032,43 +1021,28 @@ local function StartAttack(config, now)
     }
 end
 
-local function WalkTracks(animator, previous)
-    local fresh = parry.Fresh
-    table.clear(fresh)
-    local head = memory_read("uintptr_t", animator + activeAnimationsOffset)
-    local count = memory_read("uintptr_t", animator + activeAnimationsOffset + 8)
-    if not Valid(head) or not count or count > 256 then return nil end
-    local current = {}
+local function ScanKillerTracks(now)
+    local killer = parry.Killer
+    local head = memory_read("uintptr_t", killer.Animator + activeAnimationsOffset)
+    local count = memory_read("uintptr_t", killer.Animator + activeAnimationsOffset + 8)
+    if not Valid(head) or not count or count > 256 then return end
+    local previous, current = killer.Tracks, {}
     local node = memory_read("uintptr_t", head)
     for _ = 1, count do
         if not Valid(node) or node == head then break end
         local track = memory_read("uintptr_t", node + 0x10)
         if Valid(track) then
-            local id = previous and previous[track]
-            if not id then
+            current[track] = true
+            if previous and not previous[track] then
                 local animation = memory_read("uintptr_t", track + trackAnimationOffset)
-                id = if Valid(animation) then ReadAnimationId(animation) else ""
-                fresh[#fresh + 1] = id
+                local id = Valid(animation) and ReadAnimationId(animation)
+                local config = id and attackAnimations[id]
+                if config then StartAttack(config, now) end
+                local crouch = id and parry.CrouchAnimations[id]
+                if crouch then parry.Crouch = {Config = crouch, Ends = now + crouch.Duration} end
             end
-            current[track] = id
         end
         node = memory_read("uintptr_t", node)
-    end
-    return current
-end
-
-local function ScanKillerTracks(now)
-    local killer = parry.Killer
-    local previous = killer.Tracks
-    local current = WalkTracks(killer.Animator, previous)
-    if not current then return end
-    if previous then
-        for _, id in parry.Fresh do
-            local config = attackAnimations[id]
-            if config then StartAttack(config, now) end
-            local crouch = parry.CrouchAnimations[id]
-            if crouch then parry.Crouch = {Config = crouch, Ends = now + crouch.Duration} end
-        end
     end
     killer.Tracks = current
 end
@@ -1121,8 +1095,8 @@ local function CheckAttack(now)
 end
 
 local function UpdateParry(now)
-    if parry.Version ~= world.Version then
-        parry.Version = world.Version
+    if now >= parry.NextRefresh then
+        parry.NextRefresh = NextSlot(now, .12)
         RefreshParry()
         parryTuning.PastTime = math.clamp((tonumber(GetPingValue()) or 0) / 1000, 0, .6)
     end
@@ -1132,10 +1106,18 @@ local function UpdateParry(now)
     end
     parry.KillerPosition = parry.Killer.Root.Position
     if not parry.KillerPosition then
-        parry.Killer, parry.Attack, parry.Crouch = nil, nil, nil
+        parry.Killer, parry.Attack, parry.Crouch, parry.NextRefresh = nil, nil, nil, 0
         return false
     end
-    parry.KillerVelocity = parry.Track(parry.KillerHistory, now, parry.KillerPosition)
+    local elapsed = now - (parry.LastKillerTime or 0)
+    if parry.LastKillerPosition and elapsed > 0 and elapsed < .5 then
+        local delta = (parry.KillerPosition - parry.LastKillerPosition) / elapsed
+        local flat = Vector3.new(delta.X, 0, delta.Z)
+        parry.KillerVelocity = if parry.KillerVelocity then parry.KillerVelocity:Lerp(flat, .3) else flat
+    else
+        parry.KillerVelocity = nil
+    end
+    parry.LastKillerPosition, parry.LastKillerTime = parry.KillerPosition, now
     parry.LocalPosition = parry.LocalRoot and parry.LocalRoot.Position
     local history = parry.History
     if parry.LocalPosition then
@@ -1149,7 +1131,7 @@ local function UpdateParry(now)
     ScanKillerTracks(now)
     if parry.Attack and now > parry.Attack.Ends then parry.Attack = nil end
     if parry.Crouch and now > parry.Crouch.Ends then parry.Crouch = nil end
-    if settings.AutoParry and parry.HasDagger and parryTuning.Active() then CheckAttack(now) end
+    if bAutoParry and parry.HasDagger and parryTuning.Active() then CheckAttack(now) end
     return true
 end
 
@@ -1184,11 +1166,18 @@ local function RenderParry()
         parry.KillerRenderRoot = killer.Root
         table.clear(killerHistory)
     end
-    local velocity = parry.Track(killerHistory, now, position)
-    if velocity and parryTuning.Prediction > 0 then position += velocity * parryTuning.Prediction end
+    local newest = killerHistory[#killerHistory]
+    if newest and now - newest.Time > .5 then table.clear(killerHistory) end
+    killerHistory[#killerHistory + 1] = {Time = now, Position = position}
+    while #killerHistory > 2 and now - killerHistory[2].Time >= .15 do table.remove(killerHistory, 1) end
+    local oldest = killerHistory[1]
+    if parryTuning.Prediction > 0 and now - oldest.Time > .03 then
+        local velocity = (position - oldest.Position) / (now - oldest.Time)
+        position += Vector3.new(velocity.X, 0, velocity.Z) * parryTuning.Prediction
+    end
     local attack = parry.Attack
     local radius = AttackRadius(attack and attack.Config or attackDefaults)
-    local color = if attack then parryAttackColor else settings.ParryRangeColor
+    local color = if attack then parryAttackColor else parryRangeColor
     local cx, cy, cz = position.X, position.Y, position.Z
     DrawGroundCircle(cx, cy, cz, radius, color)
     local history = parry.RenderHistory
@@ -1247,7 +1236,7 @@ do
     local hitSamples = 4
     local throwers, targets, motions = {}, {}, {}
     local ownRoot, ownIsSurvivor
-    local seenVersion
+    local nextRefresh = 0
     local arcPoints = {}
 
     local function LerpColor(a, b, t)
@@ -1258,60 +1247,87 @@ do
     RebuildDaggerGradient = function()
         for i = 0, gradientSteps do
             local fraction = i / gradientSteps
-            gradient[i] = LerpColor(settings.DaggerColor, settings.DaggerEndColor, fraction)
+            gradient[i] = LerpColor(daggerColor, daggerEndColor, fraction)
             hitGradient[i] = LerpColor(Color3.fromRGB(255, 120, 50), Color3.fromRGB(255, 30, 30), fraction)
             missGradient[i] = LerpColor(Color3.fromRGB(255, 250, 170), Color3.fromRGB(255, 215, 30), fraction)
         end
     end
     RebuildDaggerGradient()
 
+    local function AnimatorOf(character)
+        local humanoid = character and character:FindFirstChild("Humanoid")
+        local animator = humanoid and humanoid:FindFirstChild("Animator")
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if animator and root then return animator.Address, root end
+        return nil
+    end
+
     local function Refresh()
         local states = {}
         for _, thrower in throwers do states[thrower.Animator] = thrower.State end
         local list, roots, newMotions = {}, {}, {}
-        ownRoot, ownIsSurvivor = world.LocalRoot, world.LocalTeam == "Survivors"
-        local animator = world.LocalAnimator
-        if animator and ownRoot and world.LocalTeam == "Killer" then
-            list[#list + 1] = {Animator = animator, Root = ownRoot, IsLocal = true, State = states[animator] or {}}
+        local localPlayer = Players.LocalPlayer
+        local localTeam = TeamName(localPlayer)
+        local animator, root = AnimatorOf(localPlayer.Character)
+        ownRoot, ownIsSurvivor = root, localTeam == "Survivors"
+        if animator and localTeam == "Killer" then
+            list[#list + 1] = {Animator = animator, Root = root, IsLocal = true, State = states[animator] or {}}
         end
-        for _, member in world.Roster do
-            local id = member.RootAddress
-            local motion = motions[id] or {}
-            newMotions[id] = motion
-            roots[#roots + 1] = {
-                Team = member.Team,
-                Motion = motion,
-                Root = member.Root,
-                Head = member.Head,
-                LeftLeg = member.LeftLeg,
-                RightLeg = member.RightLeg,
-            }
-            if member.Team == "Killer" then
-                list[#list + 1] = {Animator = member.Animator, Root = member.Root, State = states[member.Animator] or {}}
+        for _, player in Players:GetPlayers() do
+            Yield()
+            if player ~= localPlayer then
+                local team = TeamName(player)
+                if team and team ~= "Spectator" then
+                    local character = player.Character
+                    local otherAnimator, otherRoot = AnimatorOf(character)
+                    if otherAnimator then
+                        local id = otherRoot.Address
+                        local motion = motions[id] or {}
+                        newMotions[id] = motion
+                        roots[#roots + 1] = {
+                            Team = team,
+                            Motion = motion,
+                            Root = otherRoot,
+                            Head = character:FindFirstChild("Head") or otherRoot,
+                            LeftLeg = character:FindFirstChild("Left Leg") or otherRoot,
+                            RightLeg = character:FindFirstChild("Right Leg") or otherRoot,
+                        }
+                        if team == "Killer" then
+                            list[#list + 1] = {Animator = otherAnimator, Root = otherRoot, State = states[otherAnimator] or {}}
+                        end
+                    end
+                end
             end
         end
         throwers, targets, motions = list, roots, newMotions
     end
 
     local function UpdateAimState(state, animator, now)
-        local current = WalkTracks(animator, state.Tracks)
-        if not current then return end
-        local holding, thrown = false, false
-        for _, id in current do
-            if aimAnimations[id] == "Hold" then
-                holding = true
-                break
+        local head = memory_read("uintptr_t", animator + activeAnimationsOffset)
+        local count = memory_read("uintptr_t", animator + activeAnimationsOffset + 8)
+        if not Valid(head) or not count or count > 256 then return end
+        local previous, current = state.Tracks, {}
+        local holding = false
+        local node = memory_read("uintptr_t", head)
+        for _ = 1, count do
+            if not Valid(node) or node == head then break end
+            local track = memory_read("uintptr_t", node + 0x10)
+            if Valid(track) then
+                current[track] = true
+                local animation = memory_read("uintptr_t", track + trackAnimationOffset)
+                local kind = Valid(animation) and aimAnimations[ReadAnimationId(animation)]
+                local isNew = not previous or not previous[track]
+                if kind == "Hold" then
+                    holding = true
+                    if isNew then state.Aiming = true end
+                elseif kind == "Throw" and isNew then
+                    state.Aiming = false
+                    state.ThrownAt = now
+                end
             end
+            node = memory_read("uintptr_t", node)
         end
-        for _, id in parry.Fresh do
-            local kind = aimAnimations[id]
-            if kind == "Hold" then
-                state.Aiming = true
-            elseif kind == "Throw" then
-                thrown = true
-            end
-        end
-        if thrown then state.Aiming = false end
+        if state.ThrownAt == now then state.Aiming = false end
         if holding then
             state.LastHold = now
         elseif state.Aiming and (not state.LastHold or now - state.LastHold > aimTimeout) then
@@ -1457,9 +1473,9 @@ do
         return Vector3.new(unit.X * math.cos(angle), math.sin(angle), unit.Z * math.cos(angle))
     end
 
-    world.VeilAim.Steer = function(camera, position, look, want, dt)
+    world.VeilAim.Steer = function(camera, position, look, want)
         if look:Dot(want) > .999999 or not guard.SameServer() then return end
-        local blended = look + (want - look) * (1 - (1 - world.VeilAim.Speed) ^ (dt * 60))
+        local blended = look + (want - look) * world.VeilAim.Speed
         if blended.Magnitude < 1e-4 then return end
         camera.lookAt(position, position + blended.Unit)
     end
@@ -1523,15 +1539,13 @@ do
     end
 
     UpdateDaggerAim = function(now, reset)
-        if reset then throwers, targets, motions, seenVersion = {}, {}, {}, world.Version end
-        if seenVersion ~= world.Version then
-            seenVersion = world.Version
+        if reset then throwers, targets, motions, nextRefresh = {}, {}, {}, 0 end
+        if now >= nextRefresh then
+            nextRefresh = NextSlot(now, .25)
             Refresh()
+            now = tick()
         end
-        if #throwers == 0 then
-            world.VeilAim.Want = nil
-            return false
-        end
+        if #throwers == 0 then return false end
         for _, target in targets do
             local position = target.Root.Position
             local head, left, right = target.Head.Position, target.LeftLeg.Position, target.RightLeg.Position
@@ -1551,7 +1565,7 @@ do
             thrower.Aiming = thrower.State.Aiming == true and (not thrower.IsLocal or leftHeld == true)
             if thrower.IsLocal then
                 local aim = world.VeilAim
-                aim.MarkPoint, aim.Want = nil, nil
+                aim.MarkPoint = nil
                 local camera = workspace.CurrentCamera
                 local keyHeld = aim.KeyHeld and aim.KeyHeld()
                 if not keyHeld or not thrower.Aiming then aim.Locked = nil end
@@ -1569,7 +1583,7 @@ do
                         local want = aim.Solve(cframe, target, charge.At(now), locked)
                         if want and keyHeld then
                             aim.Locked = target.Root
-                            aim.Want, aim.WantAt = want, now
+                            aim.Steer(camera, cframe.Position, cframe.LookVector, want)
                         end
                     end
                 end
@@ -1596,15 +1610,6 @@ do
     RenderDaggerTrajectory = function()
         local now = tick()
         if ismouse1pressed() == true then charge.HeldSince = charge.HeldSince or now else charge.HeldSince = nil end
-        local aim = world.VeilAim
-        if aim.Want and now - aim.WantAt < .25 then
-            local camera = workspace.CurrentCamera
-            local dt = math.clamp(now - (aim.LastSteer or 0), 1 / 240, .05)
-            aim.LastSteer = now
-            if camera then
-                aim.Steer(camera, Vector3.new(frame.PX, frame.PY, frame.PZ), Vector3.new(frame.LX, frame.LY, frame.LZ), aim.Want, dt)
-            end
-        end
         for _, thrower in throwers do
             local point = thrower.IsLocal and thrower.Aiming and world.VeilAim.Enabled and world.VeilAim.MarkPoint
             if point then
@@ -1620,10 +1625,10 @@ do
                     local origin = Vector3.new(frame.PX, frame.PY, frame.PZ)
                     local look = Vector3.new(frame.LX, frame.LY, frame.LZ)
                     local right = Vector3.new(frame.RX, frame.RY, frame.RZ)
-                    if settings.DaggerTrajectory then
+                    if bDaggerTrajectory then
                         DrawArc(origin, look * charge.At(now), right * localRightOffset + look * localForwardOffset, thrower.EndY, if thrower.Hit then hitGradient else missGradient)
                     end
-                elseif settings.DaggerTrajectory and thrower.Origin and thrower.Finish then
+                elseif bDaggerTrajectory and thrower.Origin and thrower.Finish then
                     DrawStraight(thrower.Origin, thrower.Finish, gradient)
                 end
             end
@@ -1631,71 +1636,27 @@ do
     end
 end
 
-function world.Entry(character, team, wantBodies)
-    local root = character:FindFirstChild("HumanoidRootPart")
-    if not root then return nil end
-    local rootAddress = root.Address
-    local cached = world.Cache[rootAddress]
-    if cached and (cached.Bodies or not wantBodies) then
-        cached.Team = team
-        return cached
-    end
-    local humanoid = character:FindFirstChild("Humanoid")
-    local animator = humanoid and humanoid:FindFirstChild("Animator")
-    if not animator then return nil end
-    local entry = {Team = team, Character = character, Root = root, RootAddress = rootAddress, Animator = animator.Address, Head = root, LeftLeg = root, RightLeg = root}
-    if wantBodies then
-        local head, left, right = character:FindFirstChild("Head"), character:FindFirstChild("Left Leg"), character:FindFirstChild("Right Leg")
-        entry.Head, entry.LeftLeg, entry.RightLeg = head or root, left or root, right or root
-        entry.Bodies = head ~= nil and left ~= nil and right ~= nil
-    end
-    return entry
-end
-
 local function RefreshWorld(now)
     local player = Players.LocalPlayer
-    local localTeam = TeamName(player)
-    local wantBodies = settings.DaggerTrajectory or world.VeilAim.Enabled
-    local cache, roster = {}, {}
-    local killer, killerCharacter, localEntry
+    world.LocalTeam = TeamName(player)
+    local character = player.Character
+    world.LocalRoot = character and character:FindFirstChild("HumanoidRootPart")
+    local killerCharacter
     for _, other in Players:GetPlayers() do
-        Yield()
-        local isLocal = other == player
-        local team = if isLocal then localTeam else TeamName(other)
-        local character = (isLocal or (team and team ~= "Spectator")) and other.Character
-        if team == "Killer" and character and not killerCharacter then killerCharacter = character end
-        local entry = character and world.Entry(character, team, wantBodies and not isLocal)
-        if entry then
-            cache[entry.RootAddress] = entry
-            if isLocal then
-                localEntry = entry
-            else
-                roster[#roster + 1] = entry
-                if team == "Killer" and not killer then killer = entry end
-            end
+        if TeamName(other) == "Killer" then
+            killerCharacter = other.Character
+            break
         end
     end
-    Yield()
-    world.LocalTeam = localTeam
-    world.LocalRoot = localEntry and localEntry.Root
-    world.LocalAnimator = localEntry and localEntry.Animator
-    world.HasDagger = false
-    if localEntry and localTeam == "Survivors" and (settings.AutoParry or settings.ShowParryRange) then
-        world.HasDagger = localEntry.Character:FindFirstChild("Parrying Dagger") ~= nil or player:GetAttribute("EquippedItem") == "Parrying Dagger"
-    end
-    world.Cache, world.Roster, world.Killer = cache, roster, killer
-    Yield()
     if killerCharacter ~= world.KillerCharacter then world.NextKillerType = 0 end
     world.KillerCharacter = killerCharacter
-    local killerEntry = killer or (localTeam == "Killer" and localEntry) or nil
-    world.KillerRoot = if killerEntry then killerEntry.Root else killerCharacter and killerCharacter:FindFirstChild("HumanoidRootPart")
+    world.KillerRoot = killerCharacter and killerCharacter:FindFirstChild("HumanoidRootPart")
     if not killerCharacter then
         world.KillerType = ""
     elseif now >= world.NextKillerType then
         world.NextKillerType = now + 2
-        world.KillerType = tostring(killerCharacter:GetAttribute("MorphedKiller") or "")
+        world.KillerType = tostring(ReadAttribute(killerCharacter, "MorphedKiller") or "")
     end
-    world.Version = (world.Version or 0) + 1
 end
 
 local RenderMapEntities, UpdateZombiePositions
@@ -1708,75 +1669,57 @@ do
     local rotationOffset = tonumber(O.Primitive and O.Primitive.Rotation)
     local limbs = {"Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"}
 
-    local sides = {{Arm = "Left Arm", Leg = "Left Leg"}, {Arm = "Right Arm", Leg = "Right Leg"}}
-
-    local function PartAxes(zombie, limb)
-        local primitive = zombie.Primitives[limb]
-        if not primitive then
-            local partAddress = zombie.Parts[limb]
-            if not partAddress or not rotationOffset then return nil end
-            primitive = memory_read("uintptr_t", partAddress + primitiveOffset)
-            if not Valid(primitive) then return nil end
-            zombie.Primitives[limb] = primitive
-        end
-        local x, y, z, upX, upY, upZ
+    local function PartAxes(partAddress)
+        if not partAddress or not rotationOffset then return nil end
+        local primitive = memory_read("uintptr_t", partAddress + primitiveOffset)
+        if not Valid(primitive) then return nil end
         local start = math.min(rotationOffset, primitivePositionOffset)
         local block = ReadBlock(primitive + start, math.max(rotationOffset + 36, primitivePositionOffset + 12) - start)
-        if block then
-            local p, r = primitivePositionOffset - start, rotationOffset - start
-            x, y, z = buffer.readf32(block, p), buffer.readf32(block, p + 4), buffer.readf32(block, p + 8)
-            upX, upY, upZ = buffer.readf32(block, r + 4), buffer.readf32(block, r + 16), buffer.readf32(block, r + 28)
-        else
-            local p, r = primitive + primitivePositionOffset, primitive + rotationOffset
-            x, y, z = memory_read("float", p), memory_read("float", p + 4), memory_read("float", p + 8)
-            upX, upY, upZ = memory_read("float", r + 4), memory_read("float", r + 16), memory_read("float", r + 28)
+        local function Float(offset)
+            if block then return buffer.readf32(block, offset - start) end
+            return memory_read("float", primitive + offset)
         end
-        local up = x and upX and upY and upZ and Vector3.new(upX, upY, upZ)
-        if not up or x ~= x or math.abs(x) > 1e6 or math.abs(y) > 1e6 or math.abs(z) > 1e6 or math.abs(up.Magnitude - 1) > .05 then
-            zombie.Primitives[limb] = nil
-            return nil
-        end
-        return Vector3.new(x, y, z), up
-    end
-
-    local function AddBone(bones, count, a, b)
-        bones[count + 1], bones[count + 2], bones[count + 3] = a.X, a.Y, a.Z
-        bones[count + 4], bones[count + 5], bones[count + 6] = b.X, b.Y, b.Z
-        return count + 6
+        local base, rotation = primitivePositionOffset, rotationOffset
+        local x, y, z = Float(base), Float(base + 4), Float(base + 8)
+        if not x or x ~= x or math.abs(x) > 1e6 or math.abs(y) > 1e6 or math.abs(z) > 1e6 then return nil end
+        local up = Vector3.new(Float(rotation + 4), Float(rotation + 16), Float(rotation + 28))
+        local right = Vector3.new(Float(rotation), Float(rotation + 12), Float(rotation + 24))
+        if math.abs(up.Magnitude - 1) > .05 or math.abs(right.Magnitude - 1) > .05 then return nil end
+        return Vector3.new(x, y, z), up, right
     end
 
     UpdateZombiePositions = function()
         for _, zombie in zombies do
-            local head = PartAxes(zombie, "Head")
-            local torso, torsoUp = PartAxes(zombie, "Torso")
-            local bones, count = zombie.Bones, 0
+            local parts = zombie.Parts
+            local head = PartAxes(parts.Head)
+            local torso, torsoUp, torsoRight = PartAxes(parts.Torso)
+            local bones
             if head and torso then
                 local neck, pelvis = torso + torsoUp, torso - torsoUp
-                count = AddBone(bones, count, head, neck)
-                count = AddBone(bones, count, neck, pelvis)
-                for _, side in sides do
-                    local arm, armUp = PartAxes(zombie, side.Arm)
+                bones = {{head, neck}, {neck, pelvis}}
+                for _, side in {"Left", "Right"} do
+                    local arm, armUp = PartAxes(parts[side .. " Arm"])
                     if arm then
                         local shoulder = arm + armUp
-                        count = AddBone(bones, count, neck, shoulder)
-                        count = AddBone(bones, count, shoulder, arm - armUp)
+                        bones[#bones + 1] = {neck, shoulder}
+                        bones[#bones + 1] = {shoulder, arm - armUp}
                     end
-                    local leg, legUp = PartAxes(zombie, side.Leg)
+                    local leg, legUp = PartAxes(parts[side .. " Leg"])
                     if leg then
                         local hip = leg + legUp
-                        count = AddBone(bones, count, pelvis, hip)
-                        count = AddBone(bones, count, hip, leg - legUp)
+                        bones[#bones + 1] = {pelvis, hip}
+                        bones[#bones + 1] = {hip, leg - legUp}
                     end
                 end
             end
-            zombie.BoneCount, zombie.Head = count, head
+            zombie.Bones, zombie.Head = bones, head
         end
     end
 
     AddJob("Map entities", false, function()
         local known, firstSeen = {}, {}
         local mapAddress
-        local reads, nextTrapLookup = 0, 0
+        local reads = 0
         local function Budget(count)
             reads += count
             if reads >= readsPerTick then
@@ -1785,8 +1728,8 @@ do
             end
         end
         while Running() do
-            local wantTraps = settings.TrapESP and world.KillerType == "Butcher"
-            local wantZombies = settings.ZombieESP and world.KillerType == "Cure"
+            local wantTraps = bTrapESP and world.KillerType == "Butcher"
+            local wantZombies = bZombieESP and world.KillerType == "Cure"
             if not wantTraps then traps = {} end
             if not wantZombies then zombies = {} end
             if not memoryReady or not (wantTraps or wantZombies) or not isrbxactive() or not world.MapAddress then
@@ -1829,7 +1772,7 @@ do
                             elseif names.Humanoid and names.HumanoidRootPart and names.RagdollConstraints then
                                 local parts = {}
                                 for _, limb in limbs do parts[limb] = names[limb] end
-                                zombies[child] = {Parts = parts, Primitives = {}, Bones = {}}
+                                zombies[child] = {Parts = parts}
                                 known[child] = "Zombie"
                             elseif now - firstSeen[child] > classifyWindow then
                                 known[child] = false
@@ -1849,31 +1792,6 @@ do
                         known[child], firstSeen[child], traps[child], zombies[child] = nil, nil, nil, nil
                     end
                 end
-                if wantTraps then
-                    local missing = false
-                    for _, trap in traps do
-                        if not trap.Instance and (trap.Tries or 0) < 3 then missing = true end
-                    end
-                    if missing and now >= nextTrapLookup then
-                        nextTrapLookup = now + 3
-                        local map = workspace:FindFirstChild("Map")
-                        for _, child in map and map:GetChildren() or {} do
-                            local trap = traps[child.Address]
-                            if trap then trap.Instance = child end
-                            Budget(6)
-                        end
-                        for _, trap in traps do
-                            if not trap.Instance then trap.Tries = (trap.Tries or 0) + 1 end
-                        end
-                    end
-                    for _, trap in traps do
-                        if trap.Instance and not trap.Sprung then
-                            local armed = trap.Instance:GetAttribute("Armed")
-                            if armed == false or armed == "false" then trap.Sprung = true end
-                            Budget(40)
-                        end
-                    end
-                end
                 Sleep(1)
             end
         end
@@ -1882,21 +1800,20 @@ do
     RenderMapEntities = function()
         for _, trap in traps do
             local position = trap.Position
-            local x, y
-            if not trap.Sprung then x, y = Project(position.X, position.Y, position.Z) end
-            if x then DrawText(x, y, "Bear Trap", settings.TrapColor) end
+            local x, y = Project(position.X, position.Y, position.Z)
+            if x then DrawText(x, y, "Bear Trap", trapColor) end
         end
         for _, zombie in zombies do
-            local bones = zombie.Bones
-            for index = 1, zombie.BoneCount or 0, 6 do
-                local ax, ay = Project(bones[index], bones[index + 1], bones[index + 2])
-                local bx, by = Project(bones[index + 3], bones[index + 4], bones[index + 5])
-                if ax and bx then DrawLine(ax, ay, bx, by, settings.ZombieColor) end
+            for _, bone in zombie.Bones or {} do
+                local a, b = bone[1], bone[2]
+                local ax, ay = Project(a.X, a.Y, a.Z)
+                local bx, by = Project(b.X, b.Y, b.Z)
+                if ax and bx then DrawLine(ax, ay, bx, by, zombieColor) end
             end
             local head = zombie.Head
             if head then
                 local x, y = Project(head.X, head.Y + 1.5, head.Z)
-                if x then DrawText(x, y, "Zombie", settings.ZombieColor) end
+                if x then DrawText(x, y, "Zombie", zombieColor) end
             end
         end
     end
@@ -2138,7 +2055,7 @@ do
         if not killer or #hud.Shown == 0 then return end
         hud.ReadIndex = hud.ReadIndex % #hud.Shown + 1
         local shown = hud.Shown[hud.ReadIndex]
-        hud.Values[shown.Attribute] = killer:GetAttribute(shown.Attribute)
+        hud.Values[shown.Attribute] = ReadAttribute(killer, shown.Attribute)
     end
 
     local function HandleMouse()
@@ -2201,15 +2118,10 @@ do
 
     RenderInfoHud = function(visible)
         if not visible then
-            if hud.Drawn then
-                hud.Drawn = nil
-                for _, entry in parts do Show(entry, false) end
-                for _, row in rows do Show(row, false) end
-            end
+            for _, entry in parts do Show(entry, false) end
+            for _, row in rows do Show(row, false) end
             return
         end
-        if hud.Drawn == hud.Lines and hud.DrawnX == hud.X and hud.DrawnY == hud.Y and hud.DrawnWidth == hud.Width then return end
-        hud.Drawn, hud.DrawnX, hud.DrawnY, hud.DrawnWidth = hud.Lines, hud.X, hud.Y, hud.Width
         local lineCount, gaps = 0, 0
         for _, line in hud.Lines do
             if line.Gap then gaps += 1 else lineCount += 1 end
@@ -2265,13 +2177,7 @@ end
 local UpdatePumpkins, RenderPumpkins
 
 do
-    local pumpkins = {}
-    local circles = NewPool("Circle", 32, function(object)
-        object.Thickness = outlineThickness
-        object.NumSides = 32
-        object.Filled = false
-        object.Transparency = 1
-    end)
+    local pumpkins, circles = {}, {}
     local nextScan = 0
     local scanInterval = 2
 
@@ -2295,8 +2201,16 @@ do
         pumpkins = found
         local count = 0
         for _ in found do count += 1 end
-        circles.Wanted = count
-        GrowPool(circles)
+        while #circles < count do
+            local object = Drawing.new("Circle")
+            object.Thickness = outlineThickness
+            object.NumSides = 32
+            object.Filled = false
+            object.Transparency = 1
+            object.Visible = false
+            allDrawings[#allDrawings + 1] = object
+            circles[#circles + 1] = {Object = object, Visible = false}
+        end
     end
 
     RenderPumpkins = function(visible)
@@ -2319,9 +2233,9 @@ do
                         entry.Radius = radius
                         object.Radius = radius
                     end
-                    if entry.Color ~= settings.PumpkinColor then
-                        entry.Color = settings.PumpkinColor
-                        object.Color = settings.PumpkinColor
+                    if entry.Color ~= pumpkinColor then
+                        entry.Color = pumpkinColor
+                        object.Color = pumpkinColor
                     end
                     if not entry.Visible then
                         entry.Visible = true
@@ -2330,12 +2244,17 @@ do
                 end
             end
         end
-        circles.Used = used
-        FinishPool(circles)
+        for index = used + 1, #circles do
+            local entry = circles[index]
+            if entry.Visible then
+                entry.Visible = false
+                entry.Object.Visible = false
+            end
+        end
     end
 end
 
-world.Blind = {NextLookup = 0, Hidden = false}
+world.Blind = {NextLookup = 0, Hidden = false, Enabled = false}
 do
     local blind = world.Blind
 
@@ -2357,7 +2276,7 @@ do
     end
 
     function blind.Step(now)
-        local enabled = settings.HideBlind and guard.SameServer()
+        local enabled = world.Blind.Enabled and guard.SameServer()
         if blind.Hidden and not enabled then blind.Restore() end
         if not enabled then return end
         if now >= blind.NextLookup then Lookup(now) end
@@ -2371,20 +2290,20 @@ end
 local function Render()
     local started = os.clock()
     world.Blind.Step(tick())
-    lines.Used, texts.Used, triangles.Used = 0, 0, 0
+    usedLines, usedTexts, usedTriangles = 0, 0, 0
     parry.DotX = nil
     parryTuning.Poll()
     UpdateCamera(tick())
     if frame.Ready and not vault.Scanning then
-        if settings.PalletESP then
+        if bPalletESP then
             for _, entry in trackers.Pallets.Entries do
-                if not entry.Hidden then Highlight(entry.Pose, settings.PalletColor) end
+                if not entry.Hidden then Highlight(entry.Pose, palletColor) end
             end
         end
-        if settings.WindowESP then
-            for _, pose in windows do Highlight(pose, settings.WindowColor) end
+        if bWindowESP then
+            for _, pose in windows do Highlight(pose, windowColor) end
         end
-        if settings.GeneratorESP then
+        if bGeneratorESP then
             for _, entry in trackers.Generators.Entries do
                 local color = GeneratorColor(entry)
                 Highlight(entry.Pose, color, true)
@@ -2392,8 +2311,8 @@ local function Render()
             end
         end
         RenderMapEntities()
-        if settings.ShowParryRange and parry.HasDagger and parryTuning.Active() then RenderParry() end
-        if settings.DaggerTrajectory or world.VeilAim.Enabled then RenderDaggerTrajectory() end
+        if bShowParryRange and parry.HasDagger and parryTuning.Active() then RenderParry() end
+        if bDaggerTrajectory or world.VeilAim.Enabled then RenderDaggerTrajectory() end
     end
     local dot = parry.Dot
     if parry.DotX then
@@ -2409,14 +2328,35 @@ local function Render()
     elseif dot.Visible then
         dot.Visible = false
     end
-    RenderPumpkins(settings.PumpkinESP and frame.Ready and not vault.Scanning)
-    RenderInfoHud(settings.InfoHud and not vault.Scanning)
-    FinishPool(triangles)
-    FinishPool(lines)
-    FinishPool(texts)
-    if settings.DebugStats then
+    RenderPumpkins(bPumpkinESP and frame.Ready and not vault.Scanning)
+    RenderInfoHud(bInfoHud and not vault.Scanning)
+    if usedLines > wantedLines then wantedLines = usedLines end
+    if usedTexts > wantedTexts then wantedTexts = usedTexts end
+    if usedTriangles > wantedTriangles then wantedTriangles = usedTriangles end
+    for index = usedTriangles + 1, #triangles do
+        local entry = triangles[index]
+        if entry.Visible then
+            entry.Visible = false
+            entry.Object.Visible = false
+        end
+    end
+    for index = usedLines + 1, #lines do
+        local entry = lines[index]
+        if entry.Visible then
+            entry.Visible = false
+            entry.Object.Visible = false
+        end
+    end
+    for index = usedTexts + 1, #texts do
+        local entry = texts[index]
+        if entry.Visible then
+            entry.Visible = false
+            entry.Object.Visible = false
+        end
+    end
+    if bDebugStats then
         stats.Renders += 1
-        stats.Lines = lines.Used
+        stats.Lines = usedLines
         stats.RenderTime += os.clock() - started
     end
 end
@@ -2446,11 +2386,15 @@ AddJob("Main", false, function()
                 RestartWindows(now)
                 map, mapAddress, generatorFolder, nextMapCheck = nil, nil, nil, 0
                 world.NextRefresh, world.LocalRoot, world.KillerRoot, world.KillerCharacter = 0, nil, nil, nil
-                world.Cache, world.Roster, world.Killer, world.Version = {}, {}, nil, (world.Version or 0) + 1
             end
-            GrowPool(lines)
-            GrowPool(texts)
-            GrowPool(triangles)
+            GrowLines()
+            GrowTexts()
+            GrowTriangles()
+            if now >= world.NextRefresh then
+                world.NextRefresh = NextSlot(now, 0)
+                RefreshWorld(now)
+                now = tick()
+            end
             if now >= nextMapCheck then
                 nextMapCheck = now + 2
                 map = workspace:FindFirstChild("Map")
@@ -2463,21 +2407,21 @@ AddJob("Main", false, function()
                 end
             end
             UpdateTracker(trackers.Generators, map, now)
-            if settings.GeneratorESP or settings.InfoHud then UpdateGenerators(tick()) end
+            if bGeneratorESP or bInfoHud then UpdateGenerators(tick()) end
             if trackers.Generators.Address ~= generatorFolder then
                 generatorFolder = trackers.Generators.Address
                 RestartWindows(tick())
             end
-            if settings.PalletESP or settings.AutoPallet then
+            if bPalletESP or bAutoPallet then
                 UpdateTracker(trackers.Pallets, map, now)
                 UpdatePallets(tick())
             end
-            if settings.AutoPallet then UpdateAutoPallet(tick()) end
-            if settings.AutoCrouch then UpdateAutoCrouch(tick()) else ReleaseCrouch() end
-            if settings.ZombieESP then UpdateZombiePositions() end
-            if settings.PumpkinESP then UpdatePumpkins(map, tick()) end
-            if settings.InfoHud then UpdateInfoHud(tick()) end
-            if settings.WindowESP and map and restorePending then
+            if bAutoPallet then UpdateAutoPallet(tick()) end
+            if bAutoCrouch then UpdateAutoCrouch(tick()) else ReleaseCrouch() end
+            if bZombieESP then UpdateZombiePositions() end
+            if bPumpkinESP then UpdatePumpkins(map, tick()) end
+            if bInfoHud then UpdateInfoHud(tick()) end
+            if bWindowESP and map and restorePending then
                 restorePending = false
                 if RestoreWindows(map) then
                     stableScans = windowStableScans
@@ -2485,7 +2429,7 @@ AddJob("Main", false, function()
                     windows, windowPaths.Parents = {}, {}
                 end
             end
-            if settings.WindowESP and map and stableScans < windowStableScans and tick() >= nextWindowScan then
+            if bWindowESP and map and stableScans < windowStableScans and tick() >= nextWindowScan then
                 local count = ScanWindows(map)
                 if count and count >= minimumWindows and count == windowCount then
                     stableScans += 1
@@ -2496,20 +2440,13 @@ AddJob("Main", false, function()
                 windowCount = count or windowCount
                 nextWindowScan = tick() + windowScanInterval
             end
-            if settings.DebugStats then
+            if bDebugStats then
                 stats.Loops += 1
                 stats.LoopTime += os.clock() - started
                 PrintStats(tick())
             end
             Sleep(loopInterval)
         end
-    end
-end)
-
-AddJob("Roster", false, function()
-    while Running() do
-        if isrbxactive() then RefreshWorld(tick()) end
-        Sleep(.5)
     end
 end)
 
@@ -2589,7 +2526,7 @@ AddJob("Skill check", true, function()
     end
 
     while Running() do
-        if not settings.AutoSkillCheck or not isrbxactive() then
+        if not bAutoSkillCheck or not isrbxactive() then
             check, line, goal, trapPerfect, trapGoal, nextFind = nil, nil, nil, nil, nil, 0
             Sleep(.5)
         else
@@ -2641,8 +2578,8 @@ AddJob("Parry", true, function()
         return
     end
     while Running() do
-        if not (settings.AutoParry or settings.ShowParryRange or settings.AutoCrouch) or not isrbxactive() then
-            parry.Attack, parry.Crouch, parry.KillerPosition, parry.Killer, parry.LocalRoot, parry.Version = nil, nil, nil, nil, nil, world.Version
+        if not (bAutoParry or bShowParryRange or bAutoCrouch) or not isrbxactive() then
+            parry.Attack, parry.Crouch, parry.KillerPosition, parry.Killer, parry.LocalRoot, parry.NextRefresh = nil, nil, nil, nil, nil, 0
             table.clear(parry.History)
             Sleep(.5)
         elseif UpdateParry(tick()) then
@@ -2653,11 +2590,11 @@ AddJob("Parry", true, function()
     end
 end)
 
-AddJob("Dagger aim", false, function()
+AddJob("Dagger aim", true, function()
     if not activeAnimationsOffset or not trackAnimationOffset or not animationIdOffset then return end
     local paused = false
     while Running() do
-        if not (settings.DaggerTrajectory or world.VeilAim.Enabled) or not isrbxactive() then
+        if not (bDaggerTrajectory or world.VeilAim.Enabled) or not isrbxactive() then
             paused = true
             Sleep(.5)
         else
@@ -2876,7 +2813,7 @@ do
 
     local function FaceCamera(rootAddress)
         local camera = workspace.CurrentCamera
-        if not camera or not rotationOffset or not primitiveOffset or not rootAddress then return end
+        if not camera or not rotationOffset or not rootAddress then return end
         local look = camera.CFrame.LookVector
         local length = math.sqrt(look.X * look.X + look.Z * look.Z)
         if length < .01 then return end
@@ -2902,8 +2839,6 @@ do
             if disabled and humanoid and guard.SameServer() then memory_write("byte", humanoid + autoRotateOffset, 1) end
             disabled = false
         end
-        moonwalk.Restore = Restore
-        _G.MatchaVDRestore = Restore
 
         while Running() do
             local now = tick()
@@ -2930,6 +2865,7 @@ do
                 Sleep(if moonwalk.Enabled then 1 / 60 else .25)
             end
         end
+        Restore()
     end)
 
     moonwalk.KeyHeld = function()
@@ -2975,19 +2911,19 @@ if UILib then
 
     local mainTab = window:tab("Main")
     local main = mainTab:section("Main")
-    main:toggle({Name = "Auto skill check", Flag = "vd_skill", Default = settings.AutoSkillCheck, Callback = Bool(function(v) settings.AutoSkillCheck = v end)})
-    main:toggle({Name = "Auto drop pallet on killer", Flag = "vd_auto_pallet", Default = settings.AutoPallet, Callback = Bool(function(v) settings.AutoPallet = v end)})
-    main:toggle({Name = "Auto crouch (against Abysswalker)", Flag = "vd_crouch", Default = settings.AutoCrouch, Callback = Bool(function(v) settings.AutoCrouch = v end)})
+    main:toggle({Name = "Auto skill check", Flag = "vd_skill", Default = bAutoSkillCheck, Callback = Bool(function(v) bAutoSkillCheck = v end)})
+    main:toggle({Name = "Auto drop pallet on killer", Flag = "vd_auto_pallet", Default = bAutoPallet, Callback = Bool(function(v) bAutoPallet = v end)})
+    main:toggle({Name = "Auto crouch (against Abysswalker)", Flag = "vd_crouch", Default = bAutoCrouch, Callback = Bool(function(v) bAutoCrouch = v end)})
     main:toggle({Name = "Moonwalk", Flag = "vd_moonwalk", Default = moonwalk.Enabled, Callback = Bool(function(v) moonwalk.Enabled = v end)})
     main:dropdown({Name = "Moonwalk mode", Flag = "vd_moonwalk_mode", Values = {"Blatant", "Legit"}, Default = "Blatant", Callback = function(v)
         moonwalk.Mode = if v == "Legit" then "Legit" else "Blatant"
     end})
     main:keybind({Name = "Moonwalk bind", Flag = "vd_moonwalk_kb", Default = moonwalk.DefaultKey, Show = function(w) return w:get("vd_moonwalk_mode") == "Legit" end})
-    main:toggle({Name = "Hide flashlight blind", Flag = "vd_blind", Default = settings.HideBlind, Callback = Bool(function(v) settings.HideBlind = v end)})
+    main:toggle({Name = "Hide flashlight blind", Flag = "vd_blind", Default = world.Blind.Enabled, Callback = Bool(function(v) world.Blind.Enabled = v end)})
 
     local parrying = mainTab:section("React parry")
-    parrying:toggle({Name = "React parry", Flag = "vd_parry", Default = settings.AutoParry, Callback = Bool(function(v) settings.AutoParry = v end)})
-    parrying:toggle({Name = "Visualize react parry", Flag = "vd_parry_range", Default = settings.ShowParryRange, Callback = Bool(function(v) settings.ShowParryRange = v end)})
+    parrying:toggle({Name = "React parry", Flag = "vd_parry", Default = bAutoParry, Callback = Bool(function(v) bAutoParry = v end)})
+    parrying:toggle({Name = "Visualize react parry", Flag = "vd_parry_range", Default = bShowParryRange, Callback = Bool(function(v) bShowParryRange = v end)})
     parrying:keybind({Name = "React parry key (toggle, optional)", Flag = "vd_parry_kb", Default = 0})
     parrying:slider({Name = "Killer prediction (s)", Flag = "vd_parry_predict", Min = 0, Max = .5, Float = true, Default = parryTuning.Prediction, Callback = function(v)
         parryTuning.Prediction = math.clamp(tonumber(v) or .1, 0, .5)
@@ -3022,41 +2958,41 @@ if UILib then
 
     local visualTab = window:tab("Visual")
     local esp = visualTab:section("ESP")
-    esp:toggle({Name = "Generator ESP", Flag = "vd_gen", Default = settings.GeneratorESP, Callback = Bool(function(v) settings.GeneratorESP = v end)})
-    esp:toggle({Name = "Kicked generator color", Flag = "vd_kicked", Default = settings.KickedColor, Callback = Bool(function(v) settings.KickedColor = v end)})
-    esp:toggle({Name = "Pallet ESP", Flag = "vd_pal", Default = settings.PalletESP, Callback = Bool(function(v) settings.PalletESP = v end)})
-    esp:toggle({Name = "Window ESP", Flag = "vd_win", Default = settings.WindowESP, Callback = Bool(function(v) settings.WindowESP = v end)})
-    esp:toggle({Name = "Bear trap ESP", Flag = "vd_trap", Default = settings.TrapESP, Callback = Bool(function(v) settings.TrapESP = v end)})
-    esp:toggle({Name = "Cure zombie skeleton ESP", Flag = "vd_zombie", Default = settings.ZombieESP, Callback = Bool(function(v) settings.ZombieESP = v end)})
-    esp:toggle({Name = "Pumpkin ESP", Flag = "vd_pumpkin", Default = settings.PumpkinESP, Callback = Bool(function(v) settings.PumpkinESP = v end)})
-    esp:toggle({Name = "Veil dagger trajectory", Flag = "vd_dagger", Default = settings.DaggerTrajectory, Callback = Bool(function(v) settings.DaggerTrajectory = v end)})
-    esp:toggle({Name = "Info HUD", Flag = "vd_hud", Default = settings.InfoHud, Callback = Bool(function(v) settings.InfoHud = v end)})
+    esp:toggle({Name = "Generator ESP", Flag = "vd_gen", Default = bGeneratorESP, Callback = Bool(function(v) bGeneratorESP = v end)})
+    esp:toggle({Name = "Kicked generator color", Flag = "vd_kicked", Default = bKickedColor, Callback = Bool(function(v) bKickedColor = v end)})
+    esp:toggle({Name = "Pallet ESP", Flag = "vd_pal", Default = bPalletESP, Callback = Bool(function(v) bPalletESP = v end)})
+    esp:toggle({Name = "Window ESP", Flag = "vd_win", Default = bWindowESP, Callback = Bool(function(v) bWindowESP = v end)})
+    esp:toggle({Name = "Bear trap ESP", Flag = "vd_trap", Default = bTrapESP, Callback = Bool(function(v) bTrapESP = v end)})
+    esp:toggle({Name = "Cure zombie skeleton ESP", Flag = "vd_zombie", Default = bZombieESP, Callback = Bool(function(v) bZombieESP = v end)})
+    esp:toggle({Name = "Pumpkin ESP", Flag = "vd_pumpkin", Default = bPumpkinESP, Callback = Bool(function(v) bPumpkinESP = v end)})
+    esp:toggle({Name = "Veil dagger trajectory", Flag = "vd_dagger", Default = bDaggerTrajectory, Callback = Bool(function(v) bDaggerTrajectory = v end)})
+    esp:toggle({Name = "Info HUD", Flag = "vd_hud", Default = bInfoHud, Callback = Bool(function(v) bInfoHud = v end)})
 
     local highlighting = visualTab:section("Highlighting")
-    highlighting:slider({Name = "Highlight render distance", Flag = "vd_hl_dist", Min = 25, Max = 1000, Step = 25, Default = settings.HighlightDistance, Callback = function(v)
-        settings.HighlightDistance = math.clamp(tonumber(v) or 1000, 25, 1000)
+    highlighting:slider({Name = "Highlight render distance", Flag = "vd_hl_dist", Min = 25, Max = 1000, Step = 25, Default = highlightDistance, Callback = function(v)
+        highlightDistance = math.clamp(tonumber(v) or 1000, 25, 1000)
     end})
-    highlighting:toggle({Name = "Highlight fill", Flag = "vd_hl_fill", Default = settings.HighlightFill, Callback = Bool(function(v) settings.HighlightFill = v end)})
-    highlighting:toggle({Name = "Highlight outline", Flag = "vd_hl_outline", Default = settings.HighlightOutline, Callback = Bool(function(v) settings.HighlightOutline = v end)})
+    highlighting:toggle({Name = "Highlight fill", Flag = "vd_hl_fill", Default = bHighlightFill, Callback = Bool(function(v) bHighlightFill = v end)})
+    highlighting:toggle({Name = "Highlight outline", Flag = "vd_hl_outline", Default = bHighlightOutline, Callback = Bool(function(v) bHighlightOutline = v end)})
 
     local colors = visualTab:section("Colors")
-    colors:color({Name = "Generator", Flag = "vd_gen_col", Default = settings.GeneratorColor, Callback = function(c) settings.GeneratorColor = c end})
-    colors:color({Name = "Completed generator", Flag = "vd_gen_done", Default = settings.CompletedColor, Callback = function(c) settings.CompletedColor = c end})
-    colors:color({Name = "Kicked generator", Flag = "vd_kicked_col", Default = settings.RegressingColor, Callback = function(c) settings.RegressingColor = c end})
-    colors:color({Name = "Pallet", Flag = "vd_pal_col", Default = settings.PalletColor, Callback = function(c) settings.PalletColor = c end})
-    colors:color({Name = "Window", Flag = "vd_win_col", Default = settings.WindowColor, Callback = function(c) settings.WindowColor = c end})
-    colors:color({Name = "Bear trap", Flag = "vd_trap_col", Default = settings.TrapColor, Callback = function(c) settings.TrapColor = c end})
-    colors:color({Name = "Cure zombie", Flag = "vd_zombie_col", Default = settings.ZombieColor, Callback = function(c) settings.ZombieColor = c end})
-    colors:color({Name = "Pumpkin", Flag = "vd_pumpkin_col", Default = settings.PumpkinColor, Callback = function(c) settings.PumpkinColor = c end})
-    colors:color({Name = "Enemy dagger start", Flag = "vd_dagger_start", Default = settings.DaggerColor, Callback = function(c)
-        settings.DaggerColor = c
+    colors:color({Name = "Generator", Flag = "vd_gen_col", Default = generatorColor, Callback = function(c) generatorColor = c end})
+    colors:color({Name = "Completed generator", Flag = "vd_gen_done", Default = completedColor, Callback = function(c) completedColor = c end})
+    colors:color({Name = "Kicked generator", Flag = "vd_kicked_col", Default = regressingColor, Callback = function(c) regressingColor = c end})
+    colors:color({Name = "Pallet", Flag = "vd_pal_col", Default = palletColor, Callback = function(c) palletColor = c end})
+    colors:color({Name = "Window", Flag = "vd_win_col", Default = windowColor, Callback = function(c) windowColor = c end})
+    colors:color({Name = "Bear trap", Flag = "vd_trap_col", Default = trapColor, Callback = function(c) trapColor = c end})
+    colors:color({Name = "Cure zombie", Flag = "vd_zombie_col", Default = zombieColor, Callback = function(c) zombieColor = c end})
+    colors:color({Name = "Pumpkin", Flag = "vd_pumpkin_col", Default = pumpkinColor, Callback = function(c) pumpkinColor = c end})
+    colors:color({Name = "Enemy dagger start", Flag = "vd_dagger_start", Default = daggerColor, Callback = function(c)
+        daggerColor = c
         RebuildDaggerGradient()
     end})
-    colors:color({Name = "Enemy dagger end", Flag = "vd_dagger_end", Default = settings.DaggerEndColor, Callback = function(c)
-        settings.DaggerEndColor = c
+    colors:color({Name = "Enemy dagger end", Flag = "vd_dagger_end", Default = daggerEndColor, Callback = function(c)
+        daggerEndColor = c
         RebuildDaggerGradient()
     end})
-    colors:color({Name = "React parry range", Flag = "vd_parry_col", Default = settings.ParryRangeColor, Callback = function(c) settings.ParryRangeColor = c end})
+    colors:color({Name = "React parry range", Flag = "vd_parry_col", Default = parryRangeColor, Callback = function(c) parryRangeColor = c end})
 
     window:start()
 else
