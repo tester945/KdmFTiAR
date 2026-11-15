@@ -62,6 +62,20 @@ local attackDefaults = {Windup = 0, Linger = .8, Height = 7}
 local parrySafety = .1
 local localRadius = 1.5
 local parryTuning = {Prediction = .1, Range = 6.9, HumanizeMs = 40, PastTime = .3, RenderHistory = {}, KillerHistory = {}, Crouch = {["100014992013740"] = {Duration = 1.1, Range = 30}}}
+parryTuning.KeyOn, parryTuning.WasDown = false, false
+parryTuning.Active = function()
+    return parryTuning.Key == nil or parryTuning.KeyOn
+end
+parryTuning.Poll = function()
+    local key, down = parryTuning.Key, false
+    if key and isrbxactive() then
+        for _, pressed in getpressedkeys() do
+            if pressed == key then down = true end
+        end
+    end
+    if down and not parryTuning.WasDown then parryTuning.KeyOn = not parryTuning.KeyOn end
+    parryTuning.WasDown = down
+end
 local parryHistory = {}
 local localHalfHeight = 2.5
 local bShowParryRange = false
@@ -117,9 +131,7 @@ local renderConnect
 local camera
 local runId = os.clock()
 _G.ViolenceDistrictRunId = runId
-if isfile("ViolenceDistrict.lua") then
-    queue_on_teleport('luau.load(game:HttpGet("https://raw.githubusercontent.com/tester945/KdmFTiAR/refs/heads/main/VD.lua"))()')
-end
+queue_on_teleport('local source = game:HttpGet("https://raw.githubusercontent.com/tester945/KdmFTiAR/refs/heads/main/ViolenceDistrict.lua") if (string.byte(source, 1) or 0) < 32 then luau.load(source)() else loadstring(source)() end')
 
 local function IsHeapPointer(value)
     return type(value) == "number" and value >= 0x10000000000 and value < 0x70000000000
@@ -987,7 +999,7 @@ local function UpdateParry(now)
     parryKiller.Tracks = current
 
     if activeAttack and now > activeAttack.Ends then activeAttack = nil end
-    if bParryDetect and parryHasDagger then CheckAttack(now) end
+    if bParryDetect and parryHasDagger and parryTuning.Active() then CheckAttack(now) end
 end
 
 local function RenderParryRange()
@@ -2192,10 +2204,10 @@ do
         return false
     end
 
-    moonwalk.Listen = function()
+    moonwalk.Listen = function(flag)
         local ignored = {}
         for _, key in getpressedkeys() do ignored[key] = true end
-        moonwalk.Listening = ignored
+        moonwalk.Listening, moonwalk.ListenFlag = ignored, flag
     end
 
     local function PollListen()
@@ -2205,7 +2217,7 @@ do
             pressed[key] = true
             if not ignored[key] and not string.find(key, "Mouse") then
                 moonwalk.Listening = nil
-                window:set("MoonwalkBind", if key == "Escape" then "None" else key)
+                window:set(moonwalk.ListenFlag, if key == "Escape" then "None" else key)
                 return
             end
         end
@@ -2241,6 +2253,39 @@ do
     moonwalk.Release = function()
         if state.Disabled and state.Humanoid then Write(memory.writeu8, state.Humanoid, autoRotateOffset, 1) end
         state.Disabled = false
+    end
+
+    local blind = {NextLookup = 0, Hidden = false}
+    moonwalk.Blind = blind
+
+    local function BlindVisibleOffset()
+        return guiLayout and guiLayout.Visible or 0x345
+    end
+
+    blind.Restore = function()
+        if blind.Hidden and blind.Address then Write(memory.writeu8, blind.Address, BlindVisibleOffset(), 1) end
+        blind.Hidden = false
+    end
+
+    blind.Update = function(now)
+        if not blind.Enabled then
+            if blind.Hidden then blind.Restore() end
+            return
+        end
+        if now >= blind.NextLookup then
+            blind.NextLookup = now + 1
+            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+            local hud = playerGui and playerGui:FindFirstChild("Slasher")
+            local container = hud and hud:FindFirstChild("Blind")
+            local address = container and tonumber(container.Data) or nil
+            if address ~= blind.Address then blind.Address, blind.Hidden = address, false end
+        end
+        if not blind.Address then return end
+        local ok, byte = pcall(memory.readu8, blind.Address, BlindVisibleOffset())
+        if ok and byte == 1 then
+            Write(memory.writeu8, blind.Address, BlindVisibleOffset(), 0)
+            blind.Hidden = true
+        end
     end
 
     moonwalk.Update = function(now)
@@ -2332,7 +2377,7 @@ local function Render()
         DrawingImmediate.OutlinedText(screenCentre + offset, 52, parryAttackColor, 1, parryText, true, "Nunito")
     end
 
-    if bShowParryRange then RenderParryRange() end
+    if bShowParryRange and parryTuning.Active() then RenderParryRange() end
     if pumpkins.Enabled then pumpkins.Render() end
 
     if bPalletESP then
@@ -2386,6 +2431,7 @@ window = UI.new({
         ClearZombies()
         ReleaseCrouch()
         moonwalk.Release()
+        moonwalk.Blind.Restore()
     end,
 })
 
@@ -2434,13 +2480,19 @@ do
     end
 
     mainSection:label({Show = LegitMode, Label = function()
-        if moonwalk.Listening then return "Moonwalk bind: press a key..." end
+        if moonwalk.Listening and moonwalk.ListenFlag == "MoonwalkBind" then return "Moonwalk bind: press a key..." end
         return "Moonwalk bind: " .. (moonwalk.Key or "None")
     end})
 
     mainSection:button({Name = "Set moonwalk bind", Show = LegitMode, Callback = function()
-        moonwalk.Listen()
+        moonwalk.Listen("MoonwalkBind")
     end})
+
+    mainSection:toggle({Name = "Hide flashlight blind", Flag = "HideBlind", Default = false})
+    FlagSetters.HideBlind = function(val)
+        moonwalk.Blind.Enabled = val
+        if not val then moonwalk.Blind.Restore() end
+    end
 
     local parrySection = mainTab:section("React parry")
 
@@ -2450,6 +2502,22 @@ do
         parryKiller = nil
         activeAttack = nil
     end
+
+    window:flag("ParryBind", "None", true)
+    FlagSetters.ParryBind = function(val)
+        parryTuning.Key = if val and val ~= "None" then val else nil
+        parryTuning.KeyOn, parryTuning.WasDown = false, true
+    end
+
+    parrySection:label({Label = function()
+        if moonwalk.Listening and moonwalk.ListenFlag == "ParryBind" then return "React parry key (toggle): press a key..." end
+        if not parryTuning.Key then return "React parry key (toggle): None" end
+        return "React parry key (toggle): " .. parryTuning.Key .. (if parryTuning.KeyOn then " (on)" else " (off)")
+    end})
+
+    parrySection:button({Name = "Set react parry key", Callback = function()
+        moonwalk.Listen("ParryBind")
+    end})
 
     parrySection:toggle({Name = "Visualize react parry", Flag = "ShowParryRange", Default = true})
     FlagSetters.ShowParryRange = function(val)
@@ -2608,6 +2676,7 @@ task.spawn(function()
                 view.Position, view.Look, view.Right, view.Up = camera.Position, camera.LookVector, camera.RightVector, camera.UpVector
                 view.TanY, view.TanX = tanY, tanY * viewport.X / math.max(viewport.Y, 1)
             end
+            if not moonwalk.Listening then parryTuning.Poll() end
             if bParryDetect or bShowParryRange or bAutoCrouch then UpdateParry(os.clock()) end
             if bDaggerTrajectory then UpdateDaggerAim(os.clock()) end
             if bAutoSkillCheck then UpdateSkillCheck() end
@@ -2643,6 +2712,7 @@ task.spawn(function()
             if bZombieESP then UpdateZombies(os.clock()) end
             if pumpkins.Enabled then pumpkins.Update(os.clock()) end
             moonwalk.Update(os.clock())
+            moonwalk.Blind.Update(os.clock())
         end
         task.wait()
     end
